@@ -1,0 +1,99 @@
+{
+  "downloadToLocal": {
+    "description": "Download To Local",
+    "hint": "对应 go-music-dl 的 downloadToLocal。关闭时音频仅作为 AstrBot 消息发送，发送后清理临时文件；开启时保留到 downloadDir。",
+    "type": "bool",
+    "default": false
+  },
+  "downloadDir": {
+    "description": "Download Dir",
+    "hint": "对应 go-music-dl 的 downloadDir。音频下载目录，默认 data/downloads。相对路径按 AstrBot 运行目录解析。",
+    "type": "string",
+    "default": "data/downloads"
+  },
+  "cliPageSize": {
+    "description": "CLI Page Size",
+    "hint": "对应 go-music-dl 的 cliPageSize。点歌搜索结果最多展示的歌曲数量。",
+    "type": "int",
+    "default": 50
+  },
+  "downloadConcurrency": {
+    "description": "Download Concurrency",
+    "hint": "对应 go-music-dl 的 downloadConcurrency。批量选择多首歌曲时的并发下载数，范围 1-5。",
+    "type": "int",
+    "default": 3
+  },
+  "cookies": {
+    "description": "Platform Cookies",
+    "hint": "对应 go-music-dl 的 Cookie 管理。按平台填写 Cookie，留空表示不使用该平台 Cookie。",
+    "type": "object",
+    "items": {
+      "netease": {
+        "description": "netease Cookie",
+        "hint": "netease 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "qq": {
+        "description": "qq Cookie",
+        "hint": "qq 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "kugou": {
+        "description": "kugou Cookie",
+        "hint": "kugou 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "kuwo": {
+        "description": "kuwo Cookie",
+        "hint": "kuwo 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "migu": {
+        "description": "migu Cookie",
+        "hint": "migu 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "fivesing": {
+        "description": "fivesing Cookie",
+        "hint": "fivesing 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "jamendo": {
+        "description": "jamendo Cookie",
+        "hint": "jamendo 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "joox": {
+        "description": "joox Cookie",
+        "hint": "joox 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "qianqian": {
+        "description": "qianqian Cookie",
+        "hint": "qianqian 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "soda": {
+        "description": "soda Cookie",
+        "hint": "soda 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      },
+      "bilibili": {
+        "description": "bilibili Cookie",
+        "hint": "bilibili 平台 Cookie。",
+        "type": "text",
+        "default": ""
+      }
+    }
+  }
+}
