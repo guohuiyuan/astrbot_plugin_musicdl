@@ -19,10 +19,17 @@ class Song:
     cover: str = ""
     duration: int = 0
     extra: str = ""
+    album_id: str = ""
+    size: int = 0
+    bitrate: int = 0
+    url: str = ""
+    ext: str = ""
+    link: str = ""
+    is_invalid: bool = False
 
     @property
     def title(self) -> str:
-        artist = self.artist or "未知歌手"
+        artist = self.artist or "????"
         return f"{self.name or 'Unknown'} - {artist}"
 
 
@@ -35,17 +42,23 @@ class Collection:
     cover: str = ""
     track_count: int = 0
     kind: str = SEARCH_TYPE_PLAYLIST
+    play_count: int = 0
+    description: str = ""
+    link: str = ""
+    extra: str = ""
 
     @property
     def label(self) -> str:
-        return "专辑" if self.kind == SEARCH_TYPE_ALBUM else "歌单"
+        return "??" if self.kind == SEARCH_TYPE_ALBUM else "??"
 
 
 @dataclass
 class SelectionState:
-    search_type: str
+    keyword: str = ""
+    search_type: str = SEARCH_TYPE_SONG
     songs: list[Song] = field(default_factory=list)
     collections: list[Collection] = field(default_factory=list)
+    created_at: float = 0
 
 
 @dataclass

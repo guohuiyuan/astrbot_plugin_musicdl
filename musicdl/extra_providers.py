@@ -12,12 +12,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 from astrbot.api import logger
 
-from .models import Song
+from .models import Collection, SEARCH_TYPE_ALBUM, SEARCH_TYPE_PLAYLIST, Song
 
 UA_PC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
@@ -510,6 +510,694 @@ class BilibiliProvider(MusicProvider):
     def _fetch_view(self, bvid: str) -> dict[str, Any]:
         return self.get_json(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}", {"User-Agent": UA_PC, "Referer": "https://www.bilibili.com/"})
 
+
+
+async def _async_collection_search(self, keyword: str, limit: int, method_name: str):
+    return await asyncio.to_thread(getattr(self, method_name), keyword, limit)
+
+
+async def _async_collection_songs(self, collection: Collection, method_name: str):
+    return await asyncio.to_thread(getattr(self, method_name), collection)
+
+
+def _netease_search_album_sync(self: NeteaseProvider, keyword: str, limit: int) -> list[Collection]:
+    payload = self.post_form_json(
+        "https://music.163.com/api/search/get/web?csrf_token=",
+        {"s": keyword, "type": 10, "offset": 0, "limit": limit},
+        {"Referer": "https://music.163.com/"},
+    )
+    rows = (((payload or {}).get("result") or {}).get("albums") or [])
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album_id = str(item.get("id") or "").strip()
+        if not album_id:
+            continue
+        artist = (item.get("artist") or {}).get("name") or _join_extra_names(item.get("artists") or [])
+        albums.append(Collection(
+            id=album_id,
+            source="netease",
+            name=str(item.get("name") or ""),
+            creator=str(artist or ""),
+            cover=str(item.get("picUrl") or ""),
+            track_count=_safe_extra_int(item.get("size")),
+            kind=SEARCH_TYPE_ALBUM,
+            description=str(item.get("description") or item.get("briefDesc") or ""),
+            link=f"https://music.163.com/#/album?id={album_id}",
+            extra=_extra_json({"type": "album", "album_id": album_id, "publish_time": str(item.get("publishTime") or ""), "company": str(item.get("company") or "")}),
+        ))
+    return albums
+
+
+def _netease_search_playlist_sync(self: NeteaseProvider, keyword: str, limit: int) -> list[Collection]:
+    payload = self.post_form_json(
+        "https://music.163.com/api/search/get/web?csrf_token=",
+        {"s": keyword, "type": 1000, "offset": 0, "limit": limit},
+        {"Referer": "https://music.163.com/"},
+    )
+    rows = (((payload or {}).get("result") or {}).get("playlists") or [])
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        playlist_id = str(item.get("id") or "").strip()
+        if not playlist_id:
+            continue
+        creator = ((item.get("creator") or {}).get("nickname") or "")
+        playlists.append(Collection(
+            id=playlist_id,
+            source="netease",
+            name=str(item.get("name") or ""),
+            creator=str(creator),
+            cover=str(item.get("coverImgUrl") or ""),
+            track_count=_safe_extra_int(item.get("trackCount")),
+            kind=SEARCH_TYPE_PLAYLIST,
+            play_count=_safe_extra_int(item.get("playCount")),
+            description=str(item.get("description") or ""),
+            link=f"https://music.163.com/#/playlist?id={playlist_id}",
+        ))
+    return playlists
+
+
+def _netease_get_album_songs_sync(self: NeteaseProvider, collection: Collection) -> list[Song]:
+    payload = self.get_json(f"https://music.163.com/api/album/{collection.id}", {"Referer": "https://music.163.com/"})
+    rows = (payload or {}).get("songs") or []
+    return [_netease_song_from_item(item) for item in rows if item.get("id")]
+
+
+def _netease_get_playlist_songs_sync(self: NeteaseProvider, collection: Collection) -> list[Song]:
+    payload = self.get_json(f"https://music.163.com/api/playlist/detail?id={collection.id}", {"Referer": "https://music.163.com/"})
+    playlist = (payload or {}).get("playlist") or {}
+    rows = playlist.get("tracks") or []
+    return [_netease_song_from_item(item) for item in rows if item.get("id")]
+
+
+def _netease_song_from_item(item: dict[str, Any]) -> Song:
+    song_id = str(item.get("id") or "").strip()
+    artists = item.get("ar") or item.get("artists") or []
+    album = item.get("al") or item.get("album") or {}
+    duration = _safe_extra_int(item.get("dt") or item.get("duration"))
+    if duration > 1000:
+        duration //= 1000
+    size = _safe_extra_int(((item.get("h") or {}).get("size")) or ((item.get("m") or {}).get("size")) or ((item.get("l") or {}).get("size")))
+    bitrate = int(size * 8 / 1000 / duration) if size and duration else 0
+    album_id = str(album.get("id") or "")
+    return Song(
+        id=song_id,
+        source="netease",
+        name=str(item.get("name") or "Unknown"),
+        artist=_join_extra_names(artists) or "Unknown",
+        album=str(album.get("name") or ""),
+        cover=str(album.get("picUrl") or ""),
+        duration=duration,
+        extra=_extra_json({"song_id": song_id, "album_id": album_id}),
+        album_id=album_id,
+        size=size,
+        bitrate=bitrate,
+        link=f"https://music.163.com/#/song?id={song_id}",
+    )
+
+
+def _join_extra_names(items: list[dict[str, Any]]) -> str:
+    return " / ".join(str(item.get("name") or "").strip() for item in items if item.get("name"))
+
+
+def _safe_extra_int(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError:
+        return 0
+
+
+NeteaseProvider.search_album_sync = _netease_search_album_sync
+NeteaseProvider.search_playlist_sync = _netease_search_playlist_sync
+NeteaseProvider.get_album_songs_sync = _netease_get_album_songs_sync
+NeteaseProvider.get_playlist_songs_sync = _netease_get_playlist_songs_sync
+NeteaseProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
+NeteaseProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+NeteaseProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
+NeteaseProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+
+
+def _qianqian_search_album_sync(self: QianqianProvider, keyword: str, limit: int) -> list[Collection]:
+    params = _qianqian_signed({"word": keyword, "type": "3", "pageNo": "1", "pageSize": str(limit), "appid": QIANQIAN_APP_ID})
+    payload = self.get_json(f"https://music.91q.com/v1/search?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
+    data = (payload or {}).get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    rows = data.get("typeAlbum") or []
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album_id = _qianqian_album_id(str(item.get("albumAssetCode") or ""))
+        if not album_id:
+            continue
+        albums.append(Collection(
+            id=album_id,
+            source="qianqian",
+            name=str(item.get("title") or ""),
+            creator=_qianqian_artist_names(item.get("artist") or []),
+            cover=str(item.get("pic") or ""),
+            track_count=len(item.get("trackList") or []),
+            kind=SEARCH_TYPE_ALBUM,
+            description=str(item.get("introduce") or ""),
+            link=f"https://music.91q.com/album/{album_id}",
+            extra=_extra_json({"type": "album", "album_id": album_id, "release_date": str(item.get("releaseDate") or ""), "genre": str(item.get("genre") or ""), "lang": str(item.get("lang") or "")}),
+        ))
+    return albums
+
+
+def _qianqian_search_playlist_sync(self: QianqianProvider, keyword: str, limit: int) -> list[Collection]:
+    params = _qianqian_signed({"word": keyword, "type": "6", "pageNo": "1", "pageSize": str(limit), "appid": QIANQIAN_APP_ID})
+    payload = self.get_json(f"https://music.91q.com/v1/search?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
+    data = (payload or {}).get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    rows = data.get("typeSonglist") or []
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        playlist_id = str(item.get("id") or "").strip()
+        if not playlist_id:
+            continue
+        playlists.append(Collection(playlist_id, "qianqian", str(item.get("title") or ""), "", str(item.get("pic") or ""), _safe_extra_int(item.get("trackCount")), SEARCH_TYPE_PLAYLIST, 0, str(item.get("tag") or ""), "", _extra_json({"type": "playlist", "playlist_id": playlist_id})))
+    return playlists
+
+
+def _qianqian_get_playlist_songs_sync(self: QianqianProvider, collection: Collection) -> list[Song]:
+    params = _qianqian_signed({"id": collection.id, "appid": QIANQIAN_APP_ID, "type": "0"})
+    payload = self.get_json(f"https://music.91q.com/v1/tracklist/info?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
+    rows = (((payload or {}).get("data") or {}).get("trackList") or [])
+    return [_qianqian_song_from_item(item) for item in rows if item.get("TSID")]
+
+
+def _qianqian_get_album_songs_sync(self: QianqianProvider, collection: Collection) -> list[Song]:
+    album_id = _qianqian_album_id(_extra_collection(collection).get("album_id") or collection.id)
+    params = _qianqian_signed({"albumAssetCode": album_id, "appid": QIANQIAN_APP_ID})
+    payload = self.get_json(f"https://music.91q.com/v1/album/info?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
+    data = (payload or {}).get("data") or {}
+    rows = data.get("trackList") or []
+    songs: list[Song] = []
+    for item in rows:
+        song_id = str(item.get("assetId") or "").strip()
+        if not song_id:
+            continue
+        size, bitrate = _qianqian_rate_stats(item.get("rateFileInfo") or {}, _safe_extra_int(item.get("duration")))
+        songs.append(Song(
+            id=song_id,
+            source="qianqian",
+            name=str(item.get("title") or "Unknown"),
+            artist=_qianqian_artist_names(item.get("artist") or []) or collection.creator,
+            album=str(data.get("title") or collection.name),
+            cover=str(data.get("pic") or collection.cover),
+            duration=_safe_extra_int(item.get("duration")),
+            extra=_extra_json({"tsid": song_id, "album_id": album_id}),
+            album_id=album_id,
+            size=size,
+            bitrate=bitrate,
+            link=f"https://music.91q.com/song/{song_id}",
+        ))
+    return songs
+
+
+def _qianqian_song_from_item(item: dict[str, Any]) -> Song:
+    tsid = str(item.get("TSID") or "").strip()
+    return Song(
+        id=tsid,
+        source="qianqian",
+        name=str(item.get("title") or "Unknown"),
+        artist=_qianqian_artist_names(item.get("artist") or []) or "Unknown",
+        album=str(item.get("albumTitle") or ""),
+        cover=str(item.get("pic") or ""),
+        duration=_safe_extra_int(item.get("duration")),
+        extra=_extra_json({"tsid": tsid}),
+        link=f"https://music.91q.com/song/{tsid}",
+    )
+
+
+def _qianqian_artist_names(artists: list[dict[str, Any]]) -> str:
+    main = [str(item.get("name") or "").strip() for item in artists if item.get("name") and _safe_extra_int(item.get("artistType")) == 38]
+    if not main:
+        main = [str(item.get("name") or "").strip() for item in artists if item.get("name")]
+    return "?".join(dict.fromkeys(name for name in main if name))
+
+
+def _qianqian_album_id(value: str) -> str:
+    value = str(value or "").strip()
+    if len(value) >= 2 and value[0].isalpha():
+        return value
+    return value
+
+
+def _qianqian_rate_stats(rate_info: dict[str, Any], duration: int) -> tuple[int, int]:
+    for key in ("3000", "320", "128", "64"):
+        info = rate_info.get(key) if isinstance(rate_info, dict) else None
+        if not isinstance(info, dict):
+            continue
+        size = _safe_extra_int(info.get("size"))
+        if size > 0:
+            bitrate = int(size * 8 / 1000 / duration) if duration > 0 else _safe_extra_int(key)
+            return size, bitrate
+    return 0, 0
+
+
+def _soda_search_album_sync(self: SodaProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"q": keyword, "cursor": 0, "search_method": "input", "aid": "386088", "device_platform": "web", "channel": "pc_web"})
+    payload = self.get_json(f"https://api.qishui.com/luna/pc/search/album?{params}", {"User-Agent": UA_PC})
+    groups = (payload or {}).get("result_groups") or []
+    rows = (groups[0].get("data") if groups else []) or []
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album = (((item or {}).get("entity") or {}).get("album") or {})
+        album_id = str(album.get("id") or "").strip()
+        if not album_id:
+            continue
+        albums.append(Collection(album_id, "soda", str(album.get("name") or ""), _soda_artist_names(album.get("artists") or []), _soda_image(album.get("url_cover") or {}), _safe_extra_int(album.get("count_tracks")), SEARCH_TYPE_ALBUM, 0, str(album.get("company") or ""), f"https://www.qishui.com/share/album?album_id={album_id}", _extra_json({"type": "album", "album_id": album_id, "release_date": str(album.get("release_date") or "")})))
+    return albums
+
+
+def _soda_search_playlist_sync(self: SodaProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"q": keyword, "cursor": 0, "search_method": "input", "aid": "386088", "device_platform": "web", "channel": "pc_web"})
+    payload = self.get_json(f"https://api.qishui.com/luna/pc/search/playlist?{params}", {"User-Agent": UA_PC})
+    groups = (payload or {}).get("result_groups") or []
+    rows = (groups[0].get("data") if groups else []) or []
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        pl = (((item or {}).get("entity") or {}).get("playlist") or {})
+        playlist_id = str(pl.get("id") or "").strip()
+        if not playlist_id:
+            continue
+        owner = pl.get("owner") or {}
+        creator = str(owner.get("public_name") or owner.get("nickname") or "")
+        playlists.append(Collection(playlist_id, "soda", str(pl.get("title") or ""), creator, _soda_image(pl.get("url_cover") or {}), _safe_extra_int(pl.get("count_tracks")), SEARCH_TYPE_PLAYLIST, 0, str(pl.get("desc") or ""), f"https://www.qishui.com/playlist/{playlist_id}", _extra_json({"type": "playlist", "playlist_id": playlist_id})))
+    return playlists
+
+
+def _soda_get_playlist_songs_sync(self: SodaProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"playlist_id": collection.id, "cursor": 0, "cnt": 100, "aid": "386088", "device_platform": "web", "channel": "pc_web"})
+    payload = self.get_json(f"https://api.qishui.com/luna/pc/playlist/detail?{params}", {"User-Agent": UA_PC})
+    rows = (payload or {}).get("media_resources") or []
+    songs: list[Song] = []
+    for item in rows:
+        if item.get("type") != "track":
+            continue
+        track = ((((item.get("entity") or {}).get("track_wrapper") or {}).get("track")) or {})
+        song = _soda_song_from_track(track)
+        if song:
+            songs.append(song)
+    return songs
+
+
+def _soda_get_album_songs_sync(self: SodaProvider, collection: Collection) -> list[Song]:
+    data, _ = self.get_bytes(f"https://www.qishui.com/share/album?album_id={collection.id}", {"User-Agent": UA_PC})
+    router = _extract_soda_json_block(data.decode("utf-8", errors="replace"), "_ROUTER_DATA = ")
+    payload = json.loads(router)
+    page = ((((payload.get("loaderData") or {}).get("album_page") or {})) or {})
+    rows = page.get("trackList") or []
+    songs: list[Song] = []
+    for track in rows:
+        song = _soda_song_from_track(track)
+        if song:
+            songs.append(song)
+    return songs
+
+
+def _soda_song_from_track(track: dict[str, Any]) -> Song | None:
+    track_id = str(track.get("id") or "").strip()
+    if not track_id:
+        return None
+    album = track.get("album") or {}
+    size = max([_safe_extra_int(item.get("size")) for item in (track.get("bit_rates") or [])] + [0])
+    duration = _safe_extra_int(track.get("duration"))
+    if duration > 1000:
+        duration //= 1000
+    bitrate = int(size * 8 / 1000 / duration) if size and duration else 0
+    return Song(track_id, "soda", str(track.get("name") or "Unknown"), _soda_artist_names(track.get("artists") or []) or "Unknown", str(album.get("name") or ""), _soda_image(album.get("url_cover") or {}), duration, _extra_json({"track_id": track_id, "album_id": str(album.get("id") or "")}), str(album.get("id") or ""), size, bitrate, link=f"https://www.qishui.com/track/{track_id}")
+
+
+def _soda_artist_names(artists: list[dict[str, Any]]) -> str:
+    return " / ".join(str(item.get("name") or "").strip() for item in artists if item.get("name"))
+
+
+def _extract_soda_json_block(page: str, marker: str) -> str:
+    start = page.find(marker)
+    if start < 0:
+        raise ProviderError("soda router data not found")
+    start += len(marker)
+    depth = 0
+    in_string = False
+    escaped = False
+    started = False
+    for index in range(start, len(page)):
+        ch = page[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+            started = True
+        elif ch == "}":
+            depth -= 1
+            if started and depth == 0:
+                return page[start : index + 1]
+    raise ProviderError("soda router data is incomplete")
+
+
+def _extra_collection(collection: Collection) -> dict[str, str]:
+    try:
+        parsed = json.loads(collection.extra or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+
+
+QianqianProvider.search_album_sync = _qianqian_search_album_sync
+QianqianProvider.search_playlist_sync = _qianqian_search_playlist_sync
+QianqianProvider.get_album_songs_sync = _qianqian_get_album_songs_sync
+QianqianProvider.get_playlist_songs_sync = _qianqian_get_playlist_songs_sync
+QianqianProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
+QianqianProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+QianqianProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
+QianqianProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+SodaProvider.search_album_sync = _soda_search_album_sync
+SodaProvider.search_playlist_sync = _soda_search_playlist_sync
+SodaProvider.get_album_songs_sync = _soda_get_album_songs_sync
+SodaProvider.get_playlist_songs_sync = _soda_get_playlist_songs_sync
+SodaProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
+SodaProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+SodaProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
+SodaProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+
+
+def _fivesing_search_playlist_sync(self: FivesingProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"keyword": keyword, "sort": 1, "page": 1, "filter": 0, "type": 1})
+    payload = self.get_json(f"http://search.5sing.kugou.com/home/json?{params}", {"User-Agent": UA_PC})
+    rows = (payload or {}).get("list") or []
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        playlist_id = str(item.get("songListId") or "").strip()
+        if not playlist_id:
+            continue
+        user_id = str(item.get("userId") or "").strip()
+        creator = str(item.get("userName") or "").strip() or (f"ID: {user_id}" if user_id else "")
+        link = f"http://5sing.kugou.com/{user_id}/dj/{playlist_id}.html" if user_id else ""
+        playlists.append(Collection(playlist_id, "fivesing", _clean_html(str(item.get("title") or "")), creator, str(item.get("pictureUrl") or ""), _safe_extra_int(item.get("songCnt")), SEARCH_TYPE_PLAYLIST, _safe_extra_int(item.get("playCount")), _clean_html(str(item.get("content") or "")), link, _extra_json({"type": "playlist", "playlist_id": playlist_id, "user_id": user_id})))
+    return playlists
+
+
+def _fivesing_get_playlist_songs_sync(self: FivesingProvider, collection: Collection) -> list[Song]:
+    user_id = _extra_collection(collection).get("user_id")
+    if not user_id:
+        user_id = _fivesing_fetch_user_id(self, collection.id)
+    if not user_id:
+        raise ProviderError("fivesing playlist user id missing")
+    data, _ = self.get_bytes(f"http://5sing.kugou.com/{user_id}/dj/{collection.id}.html", {"User-Agent": UA_PC})
+    return _fivesing_songs_from_html(data.decode("utf-8", errors="replace"))
+
+
+def _fivesing_fetch_user_id(self: FivesingProvider, playlist_id: str) -> str:
+    payload = self.get_json(f"http://mobileapi.5sing.kugou.com/song/getsonglist?id={playlist_id}&songfields=ID,user", {"User-Agent": UA_PC})
+    data = (payload or {}).get("data") or {}
+    user = data.get("user") if isinstance(data, dict) else {}
+    return str((user or {}).get("ID") or "").strip()
+
+
+def _fivesing_songs_from_html(page: str) -> list[Song]:
+    blocks = re.findall(r'<li class="p_rel">([\s\S]*?)</li>', page)
+    songs: list[Song] = []
+    seen: set[str] = set()
+    for block in blocks:
+        match = re.search(r'href="http://5sing\.kugou\.com/(yc|fc|bz)/(\d+)\.html"[^>]*>([^<]+)</a>', block)
+        if not match:
+            continue
+        song_type, song_id, raw_name = match.groups()
+        key = f"{song_type}|{song_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        artist_match = re.search(r'class="s_soner[^"]*".*?>([^<]+)</a>', block)
+        artist = _clean_html(artist_match.group(1)) if artist_match else "Unknown"
+        name = _clean_html(raw_name) or f"5sing_{song_type}_{song_id}"
+        songs.append(Song(f"{song_id}|{song_type}", "fivesing", name, artist, link=f"http://5sing.kugou.com/{song_type}/{song_id}.html", extra=_extra_json({"songid": song_id, "songtype": song_type})))
+    return songs
+
+
+def _jamendo_search_album_sync(self: JamendoProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"query": keyword, "type": "album", "limit": limit, "identities": "www"})
+    rows = self._api_get(f"https://www.jamendo.com/api/search?{params}", "/api/search") or []
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album_id = str(item.get("id") or "").strip()
+        if not album_id:
+            continue
+        artist = item.get("artist") or {}
+        cover = (((item.get("cover") or {}).get("big") or {}).get("size300")) or ""
+        albums.append(Collection(album_id, "jamendo", str(item.get("name") or ""), str(artist.get("name") or ""), str(cover), 0, SEARCH_TYPE_ALBUM, 0, "", f"https://www.jamendo.com/album/{album_id}", _extra_json({"type": "album", "album_id": album_id, "artist_id": str(artist.get("id") or "")})))
+    return albums
+
+
+def _jamendo_search_playlist_sync(self: JamendoProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"query": keyword, "type": "playlist", "limit": limit, "identities": "www"})
+    rows = self._api_get(f"https://www.jamendo.com/api/search?{params}", "/api/search") or []
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        playlist_id = str(item.get("id") or "").strip()
+        if not playlist_id:
+            continue
+        playlists.append(Collection(playlist_id, "jamendo", str(item.get("name") or ""), str(item.get("user_name") or ""), str(item.get("image") or ""), 0, SEARCH_TYPE_PLAYLIST, 0, "", f"https://www.jamendo.com/playlist/{playlist_id}", _extra_json({"type": "playlist", "playlist_id": playlist_id})))
+    return playlists
+
+
+def _jamendo_get_playlist_songs_sync(self: JamendoProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"id": collection.id})
+    rows = self._api_get(f"https://www.jamendo.com/api/playlists/tracks?{params}", "/api/playlists/tracks") or []
+    songs: list[Song] = []
+    for item in rows:
+        song = self._song_from_track(item)
+        if song:
+            songs.append(song)
+    return songs
+
+
+def _jamendo_get_album_songs_sync(self: JamendoProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"id": collection.id})
+    rows = self._api_get(f"https://www.jamendo.com/api/albums?{params}", "/api/albums") or []
+    if not rows:
+        return []
+    album = rows[0]
+    songs: list[Song] = []
+    for track in album.get("tracks") or []:
+        track_id = str(track.get("id") or "").strip()
+        if not track_id:
+            continue
+        song = self._get_track(track_id)
+        if song:
+            song.album = song.album or str(album.get("name") or collection.name)
+            song.album_id = song.album_id or collection.id
+            songs.append(song)
+    return songs
+
+
+def _joox_search_album_sync(self: JooxProvider, keyword: str, limit: int) -> list[Collection]:
+    payload = self.get_json(f"https://cache.api.joox.com/openjoox/v3/search?{urlencode({'country': 'sg', 'lang': 'zh_cn', 'keyword': keyword})}", self._headers())
+    albums: list[Collection] = []
+    seen: set[str] = set()
+    for section in (payload or {}).get("section_list") or []:
+        for item in section.get("item_list") or []:
+            if item.get("type") != 2:
+                continue
+            album = item.get("album") or {}
+            album_id = _normalize_joox_id(str(album.get("id") or ""))
+            if not album_id or album_id in seen:
+                continue
+            seen.add(album_id)
+            albums.append(Collection(album_id, "joox", str(album.get("name") or ""), _joox_artist_names(album.get("artist_list") or []), _pick_image(album.get("images") or []), 0, SEARCH_TYPE_ALBUM, 0, str(album.get("publish_date") or ""), f"https://www.joox.com/hk/album/{album_id}", _extra_json({"type": "album", "album_id": album_id, "publish_date": str(album.get("publish_date") or "")})))
+            if len(albums) >= limit:
+                return albums
+    return albums
+
+
+def _joox_search_playlist_sync(self: JooxProvider, keyword: str, limit: int) -> list[Collection]:
+    payload = self.get_json(f"https://cache.api.joox.com/openjoox/v3/search?{urlencode({'country': 'sg', 'lang': 'zh_cn', 'keyword': keyword})}", self._headers())
+    playlists: list[Collection] = []
+    for section in (payload or {}).get("section_list") or []:
+        for item in section.get("item_list") or []:
+            if item.get("type") != 1:
+                continue
+            info = item.get("editor_playlist") or {}
+            playlist_id = _normalize_joox_id(str(info.get("id") or ""))
+            if not playlist_id:
+                continue
+            playlists.append(Collection(playlist_id, "joox", str(info.get("name") or ""), "", _pick_image(info.get("images") or []), 0, SEARCH_TYPE_PLAYLIST, 0, "", f"https://www.joox.com/hk/playlist/{playlist_id}", _extra_json({"type": "playlist", "playlist_id": playlist_id})))
+            if len(playlists) >= limit:
+                return playlists
+    return playlists
+
+
+def _joox_get_playlist_songs_sync(self: JooxProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"id": collection.id, "country": "sg", "lang": "zh_cn"})
+    payload = self.get_json(f"https://cache.api.joox.com/openjoox/v3/playlist?{params}", self._headers())
+    return _joox_songs_from_sections((payload or {}).get("section_list") or [])
+
+
+def _joox_get_album_songs_sync(self: JooxProvider, collection: Collection) -> list[Song]:
+    data, _ = self.get_bytes(f"https://www.joox.com/hk/album/{collection.id}", self._headers())
+    match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', data.decode("utf-8", errors="replace"), re.S)
+    if not match:
+        return []
+    payload = json.loads(match.group(1))
+    props = (((payload.get("props") or {}).get("pageProps") or {}))
+    album_data = props.get("albumData") or (((props.get("content") or {}).get("page") or {}).get("albumData") or {})
+    track_list = (album_data.get("trackList") or {}).get("items") or []
+    songs: list[Song] = []
+    for item in track_list:
+        song = _joox_song_from_info(item, str(album_data.get("title") or collection.name), str(album_data.get("imgSrc") or collection.cover), collection.id)
+        if song:
+            songs.append(song)
+    return songs
+
+
+def _joox_songs_from_sections(sections: list[dict[str, Any]]) -> list[Song]:
+    songs: list[Song] = []
+    for section in sections:
+        for item in section.get("item_list") or []:
+            for song_item in item.get("song") or []:
+                song = _joox_song_from_info(song_item.get("song_info") or {})
+                if song:
+                    songs.append(song)
+    return songs
+
+
+def _joox_song_from_info(info: dict[str, Any], fallback_album: str = "", fallback_cover: str = "", fallback_album_id: str = "") -> Song | None:
+    song_id = _normalize_joox_id(str(info.get("id") or ""))
+    if not song_id:
+        return None
+    album_id = _normalize_joox_id(str(info.get("album_id") or fallback_album_id or ""))
+    album = str(info.get("album_name") or fallback_album or "")
+    cover = _pick_image(info.get("images") or []) or fallback_cover
+    return Song(song_id, "joox", str(info.get("name") or "Unknown"), _joox_artist_names(info.get("artist_list") or []) or "Unknown", album, cover, _safe_extra_int(info.get("play_duration")), _extra_json({"songid": song_id, "album_id": album_id}), album_id, link=f"https://www.joox.com/hk/single/{song_id}")
+
+
+def _joox_artist_names(artists: list[dict[str, Any]]) -> str:
+    return " / ".join(str(item.get("name") or "").strip() for item in artists if item.get("name"))
+
+
+def _normalize_joox_id(value: str) -> str:
+    value = unquote(str(value or "").strip())
+    return value.replace(" ", "+")
+
+
+def _bilibili_search_playlist_sync(self: BilibiliProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"search_type": "video", "keyword": keyword, "page": 1, "page_size": limit})
+    payload = self.get_json(f"https://api.bilibili.com/x/web-interface/search/type?{params}", {"User-Agent": UA_PC, "Referer": "https://www.bilibili.com/"})
+    rows = (((payload or {}).get("data") or {}).get("result") or [])
+    playlists: list[Collection] = []
+    seen: set[str] = set()
+    for item in rows[:limit]:
+        bvid = str(item.get("bvid") or "").strip()
+        if not bvid:
+            continue
+        try:
+            view = self._fetch_view(bvid)
+        except Exception:
+            continue
+        data = view.get("data") or {}
+        owner = data.get("owner") or {}
+        cover = _normalize_cover(str(item.get("pic") or data.get("pic") or ""))
+        season = data.get("ugc_season") or {}
+        if season:
+            season_id = str(season.get("id") or "").strip()
+            mid = str(owner.get("mid") or "").strip()
+            playlist_id = f"season:{season_id}:{mid}:{bvid}"
+            if playlist_id in seen:
+                continue
+            seen.add(playlist_id)
+            sections = season.get("sections") or []
+            count = sum(len(section.get("episodes") or []) for section in sections)
+            stat = season.get("stat") or {}
+            playlists.append(Collection(playlist_id, "bilibili", str(season.get("title") or _clean_html(str(item.get("title") or data.get("title") or ""))), str(owner.get("name") or item.get("author") or ""), _normalize_cover(str(season.get("cover") or cover)), count, SEARCH_TYPE_PLAYLIST, _safe_extra_int(stat.get("view")), str(season.get("intro") or ""), f"https://www.bilibili.com/video/{bvid}", _extra_json({"type": "season", "season_id": season_id, "mid": mid, "bvid": bvid})))
+        else:
+            pages = data.get("pages") or []
+            if len(pages) <= 1:
+                continue
+            playlist_id = f"bvid:{bvid}"
+            if playlist_id in seen:
+                continue
+            seen.add(playlist_id)
+            playlists.append(Collection(playlist_id, "bilibili", _clean_html(str(item.get("title") or data.get("title") or "")), str(owner.get("name") or item.get("author") or ""), cover, len(pages), SEARCH_TYPE_PLAYLIST, 0, "", f"https://www.bilibili.com/video/{bvid}", _extra_json({"type": "multipart", "bvid": bvid})))
+    return playlists
+
+
+def _bilibili_get_playlist_songs_sync(self: BilibiliProvider, collection: Collection) -> list[Song]:
+    extra = _extra_collection(collection)
+    bvid = extra.get("bvid") or collection.id.replace("bvid:", "")
+    view = self._fetch_view(bvid)
+    data = view.get("data") or {}
+    owner = data.get("owner") or {}
+    artist = str(owner.get("name") or collection.creator or "Unknown")
+    season = data.get("ugc_season") or {}
+    if season:
+        return _bilibili_songs_from_sections(season.get("sections") or [], str(season.get("title") or collection.name), _normalize_cover(str(season.get("cover") or collection.cover)), artist)
+    return _bilibili_songs_from_pages(bvid, str(data.get("title") or collection.name), artist, _normalize_cover(str(data.get("pic") or collection.cover)), data.get("pages") or [])
+
+
+def _bilibili_songs_from_pages(bvid: str, title: str, artist: str, cover: str, pages: list[dict[str, Any]]) -> list[Song]:
+    songs: list[Song] = []
+    for page in pages:
+        cid = str(page.get("cid") or "").strip()
+        if not cid:
+            continue
+        part = str(page.get("part") or "").strip()
+        name = title if not part or part == title else f"{title} - {part}"
+        songs.append(Song(f"{bvid}|{cid}", "bilibili", name, artist, bvid, cover, _safe_extra_int(page.get("duration")), _extra_json({"bvid": bvid, "cid": cid}), link=f"https://www.bilibili.com/video/{bvid}"))
+    return songs
+
+
+def _bilibili_songs_from_sections(sections: list[dict[str, Any]], title: str, cover: str, artist: str) -> list[Song]:
+    songs: list[Song] = []
+    for section in sections:
+        for episode in section.get("episodes") or []:
+            bvid = str(episode.get("bvid") or "").strip()
+            cid = str(episode.get("cid") or "").strip()
+            if not bvid or not cid:
+                continue
+            arc = episode.get("arc") or {}
+            page = episode.get("page") or {}
+            name = str(episode.get("title") or arc.get("title") or page.get("part") or title or "Unknown")
+            ep_cover = _normalize_cover(str(episode.get("cover") or arc.get("pic") or cover))
+            duration = _safe_extra_int(episode.get("duration") or arc.get("duration") or page.get("duration"))
+            songs.append(Song(f"{bvid}|{cid}", "bilibili", name, artist, title, ep_cover, duration, _extra_json({"bvid": bvid, "cid": cid}), link=f"https://www.bilibili.com/video/{bvid}"))
+    return songs
+
+
+FivesingProvider.search_playlist_sync = _fivesing_search_playlist_sync
+FivesingProvider.get_playlist_songs_sync = _fivesing_get_playlist_songs_sync
+FivesingProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+FivesingProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+JamendoProvider.search_album_sync = _jamendo_search_album_sync
+JamendoProvider.search_playlist_sync = _jamendo_search_playlist_sync
+JamendoProvider.get_album_songs_sync = _jamendo_get_album_songs_sync
+JamendoProvider.get_playlist_songs_sync = _jamendo_get_playlist_songs_sync
+JamendoProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
+JamendoProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+JamendoProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
+JamendoProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+JooxProvider.search_album_sync = _joox_search_album_sync
+JooxProvider.search_playlist_sync = _joox_search_playlist_sync
+JooxProvider.get_album_songs_sync = _joox_get_album_songs_sync
+JooxProvider.get_playlist_songs_sync = _joox_get_playlist_songs_sync
+JooxProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
+JooxProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+JooxProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
+JooxProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
+BilibiliProvider.search_playlist_sync = _bilibili_search_playlist_sync
+BilibiliProvider.get_playlist_songs_sync = _bilibili_get_playlist_songs_sync
+BilibiliProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
+BilibiliProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
 
 def _extra(song: Song) -> dict[str, str]:
     try:

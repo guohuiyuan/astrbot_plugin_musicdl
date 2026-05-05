@@ -1,103 +1,117 @@
 # astrbot_plugin_musicdl
 
-纯 Python 聚合音乐点歌插件。插件内部实现音乐搜索、结果选择、换源、下载和音频发送流程，不需要额外启动 `go-music-dl` 服务或命令行程序。
+Pure Python multi-source music search and download plugin for AstrBot. It implements search, result selection, source switching, download, and audio-message sending internally. It does not require running the `go-music-dl` binary, CLI, or Web service.
 
-## 功能
+## Features
 
-- 支持多个音乐平台并发搜索。
-- 支持回复编号下载单首或多首歌曲。
-- 支持 `r1` / `换源1` 为搜索结果换源。
-- 支持直接解析部分平台歌曲链接。
-- 支持使用 `go-music-dl` 风格的配置参数：`downloadToLocal`、`downloadDir`、`cliPageSize`、`downloadConcurrency` 和 `cookies`。
-- 支持汽水音乐加密音频解密，依赖由插件 `requirements.txt` 自动安装。
+- Concurrent search across multiple music platforms.
+- Search types aligned with `go-music-dl`: `song`, `playlist`, and `album`.
+- Reply with result numbers to download one or more songs.
+- Reply with collection numbers to expand playlists or albums, then select songs from the expanded list.
+- Use `r1` or `switch1`-style source switching for song results.
+- Parse direct song links for supported platforms.
+- Uses `go-music-dl`-style configuration keys: `downloadToLocal`, `downloadDir`, `cliPageSize`, `downloadConcurrency`, and `cookies`.
+- Supports Soda Music encrypted audio decryption through the plugin `requirements.txt` dependency.
 
-## 安装
+## Installation
 
-将本插件目录放入 AstrBot 的插件目录后启用即可。
+Place this plugin directory under AstrBot's plugin directory and enable it.
 
-插件包含 `requirements.txt`：
+The plugin includes `requirements.txt`:
 
 ```text
 cryptography>=44.0.3
 ```
 
-AstrBot 会在插件加载/安装流程中自动安装缺失依赖。`cryptography` 主要用于汽水音乐音频解密。
+AstrBot should install missing plugin dependencies during plugin install/load. `cryptography` is used for Soda Music audio decryption.
 
-## 用法
+## Usage
 
 ```text
-/music 周杰伦
-/music -s qq,kuwo 稻香
-/music -s all 花海
-/music -s default 晴天
+/music jay chou
+/music -t song rice field
+/music -t playlist jay chou
+/music -t album fantasy
+/music -s qq,kuwo -t song rice field
+/music -s all -t album piano
+/music -s default sunny day
 /music https://y.qq.com/n/ryqq/songDetail/xxxx
 /music_sources
 /music_cancel
 ```
 
-搜索后回复编号下载：
+Reply after search:
 
 ```text
 1
 1 2
 r1
-换源1
-取消
+cancel
 ```
 
-## 来源选择
+Selection behavior:
 
-默认搜索源参考 `go-music-dl` 的默认行为：
+- `song`: reply with result numbers to download and send audio.
+- `playlist` / `album`: reply with collection numbers to expand the collection into songs, then reply with song numbers to download.
+- `r1` / source switching only applies to song result lists.
+
+## Source selection
+
+Default sources follow the `go-music-dl` runtime default behavior:
 
 ```text
 netease,qq,kugou,kuwo,migu,qianqian,soda
 ```
 
-默认不会搜索以下来源，但仍可通过 `-s all` 或显式指定启用：
+The following sources are not searched by default, but can be enabled with `-s all` or explicit `-s` values:
 
 ```text
 fivesing,jamendo,joox,bilibili
 ```
 
-示例：
+Examples:
 
 ```text
-/music -s bilibili 起风了
-/music -s jamendo piano
-/music -s fivesing 原创歌曲
+/music -s bilibili -t playlist wind
+/music -s jamendo -t album piano
+/music -s fivesing -t playlist original
 ```
 
-默认源是运行时行为，不作为插件配置项单独保存；如需临时指定来源，请在命令中使用 `-s`。
+The default source list is runtime behavior and is not stored as a separate plugin config item. Use `-s` to select sources per command.
 
-## 当前内置来源
+## Source capabilities
 
-- `netease` 网易云音乐
-- `qq` QQ音乐
-- `kugou` 酷狗音乐
-- `kuwo` 酷我音乐
-- `migu` 咪咕音乐
-- `fivesing` 5sing
-- `jamendo` Jamendo (CC)
-- `joox` JOOX
-- `qianqian` 千千音乐
-- `soda` 汽水音乐
-- `bilibili` Bilibili
+`/music_sources` shows whether each source is default and whether it supports song, playlist, and album search.
 
-## 配置项
+| Source | Song | Playlist | Album | Default |
+| --- | --- | --- | --- | --- |
+| `netease` NetEase Cloud Music | Yes | Yes | Yes | Yes |
+| `qq` QQ Music | Yes | Yes | Yes | Yes |
+| `kugou` Kugou Music | Yes | Yes | Yes | Yes |
+| `kuwo` Kuwo Music | Yes | Yes | Yes | Yes |
+| `migu` Migu Music | Yes | Yes | Yes | Yes |
+| `fivesing` 5sing | Yes | Yes | No | No |
+| `jamendo` Jamendo (CC) | Yes | Yes | Yes | No |
+| `joox` JOOX | Yes | Yes | Yes | No |
+| `qianqian` Qianqian Music | Yes | Yes | Yes | Yes |
+| `soda` Soda Music | Yes | Yes | Yes | Yes |
+| `bilibili` Bilibili | Yes | Yes | No | No |
 
-插件配置项使用 `go-music-dl` 已有参数名，不额外新增自定义设置名。
+## Configuration
 
-| 配置项 | 类型 | 默认值 | 说明 |
+The plugin uses existing `go-music-dl` parameter names and avoids adding unrelated custom config keys.
+
+| Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `downloadToLocal` | bool | `false` | 对应 `go-music-dl` 的 `downloadToLocal`。关闭时音频仅作为 AstrBot 消息发送，发送后清理临时文件；开启时保留到 `downloadDir`。 |
-| `downloadDir` | string | `data/downloads` | 对应 `go-music-dl` 的 `downloadDir`。音频下载目录。 |
-| `cliPageSize` | int | `50` | 对应 `go-music-dl` 的 `cliPageSize`。点歌搜索结果最多展示的歌曲数量。 |
-| `downloadConcurrency` | int | `3` | 对应 `go-music-dl` 的 `downloadConcurrency`。批量选择多首歌曲时的并发下载数，范围 `1-5`。 |
-| `cookies` | object | `{}` | 对应 `go-music-dl` 的 Cookie 管理。键名可用：`netease`,`qq`,`kugou`,`kuwo`,`migu`,`fivesing`,`jamendo`,`joox`,`qianqian`,`soda`,`bilibili`。 |
+| `downloadToLocal` | bool | `false` | Matches `go-music-dl` `downloadToLocal`. When disabled, audio is sent as an AstrBot message and the temporary file is removed after sending. When enabled, files are kept under `downloadDir`. |
+| `downloadDir` | string | `data/downloads` | Matches `go-music-dl` `downloadDir`. Audio download directory. |
+| `cliPageSize` | int | `50` | Matches `go-music-dl` `cliPageSize`. Max displayed search results and expanded collection songs. |
+| `downloadConcurrency` | int | `3` | Matches `go-music-dl` `downloadConcurrency`. Concurrent downloads when selecting multiple songs. Clamped to `1-5`. |
+| `cookies` | object | `{}` | Matches `go-music-dl` cookie management. Keys: `netease`,`qq`,`kugou`,`kuwo`,`migu`,`fivesing`,`jamendo`,`joox`,`qianqian`,`soda`,`bilibili`. |
 
-`webPageSize`、`embedDownload`、`vgChangeCover`、`vgChangeAudio`、`vgChangeLyric`、`vgExportVideo` 属于 `go-music-dl` Web 页面或视频生成流程，AstrBot 点歌插件当前不会使用，因此不放入插件配置。
+`webPageSize`, `embedDownload`, `vgChangeCover`, `vgChangeAudio`, `vgChangeLyric`, and `vgExportVideo` belong to `go-music-dl` Web/video generation flows and are not used by this AstrBot song-request plugin.
 
-Cookie 示例：
+Cookie example:
 
 ```json
 {
@@ -107,14 +121,14 @@ Cookie 示例：
 }
 ```
 
-## 注意事项
+## Notes
 
-- 部分歌曲可能因为版权、会员、地区限制、平台风控或接口变更无法下载。
-- 填写平台 Cookie 可以提高部分平台的搜索和下载可用率。
-- 本插件只负责在 AstrBot 内完成点歌和音频发送，不提供音乐版权内容。
+- Some tracks may fail because of copyright, membership, region restrictions, platform risk controls, or API changes.
+- Platform cookies can improve search/download availability for some sources.
+- This plugin only handles song requests and audio sending inside AstrBot. It does not provide copyrighted music content.
 
-## 致谢
+## Credits
 
-本插件的多平台设计、来源命名、默认源规则以及部分接口行为参考并致敬 `go-music-dl` 及其 `music-lib` 实现。
+The multi-platform design, source names, default source behavior, and part of the API behavior are inspired by and adapted from `go-music-dl` and its `music-lib` implementation.
 
-本插件是面向 AstrBot 的纯 Python 实现：不调用 `go-music-dl` 二进制、Web 服务或 CLI，只在实现思路和接口适配上参考其优秀工作。
+This plugin is a pure Python AstrBot implementation. It does not call the `go-music-dl` binary, Web service, or CLI at runtime.

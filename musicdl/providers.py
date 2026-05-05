@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 from astrbot.api import logger
 
-from .models import DownloadedFile, SEARCH_TYPE_SONG, Song
+from .models import Collection, DownloadedFile, SEARCH_TYPE_ALBUM, SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_SONG, Song
 from .extra_providers import (
     ALL_SOURCE_NAMES,
     DEFAULT_SOURCE_NAMES,
@@ -63,6 +63,18 @@ class MusicProvider:
     async def get_download_url(self, song: Song) -> SourceResponse:
         return await asyncio.to_thread(self.get_download_url_sync, song)
 
+    async def search_playlist(self, keyword: str, limit: int) -> list[Collection]:
+        return await asyncio.to_thread(self.search_playlist_sync, keyword, limit)
+
+    async def search_album(self, keyword: str, limit: int) -> list[Collection]:
+        return await asyncio.to_thread(self.search_album_sync, keyword, limit)
+
+    async def get_playlist_songs(self, collection: Collection) -> list[Song]:
+        return await asyncio.to_thread(self.get_playlist_songs_sync, collection)
+
+    async def get_album_songs(self, collection: Collection) -> list[Song]:
+        return await asyncio.to_thread(self.get_album_songs_sync, collection)
+
     def search_sync(self, keyword: str, limit: int) -> list[Song]:
         raise NotImplementedError
 
@@ -70,6 +82,18 @@ class MusicProvider:
         return None
 
     def get_download_url_sync(self, song: Song) -> SourceResponse:
+        raise NotImplementedError
+
+    def search_playlist_sync(self, keyword: str, limit: int) -> list[Collection]:
+        raise NotImplementedError
+
+    def search_album_sync(self, keyword: str, limit: int) -> list[Collection]:
+        raise NotImplementedError
+
+    def get_playlist_songs_sync(self, collection: Collection) -> list[Song]:
+        raise NotImplementedError
+
+    def get_album_songs_sync(self, collection: Collection) -> list[Song]:
         raise NotImplementedError
 
     def get_json(self, url: str, headers: dict[str, str] | None = None, *, no_redirect: bool = False) -> Any:
@@ -355,9 +379,14 @@ class MusicAggregator:
             "bilibili": BilibiliProvider(str(cookies.get("bilibili", "")), self.timeout),
         }
 
-    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None) -> list[Song]:
-        if search_type != SEARCH_TYPE_SONG:
-            raise ProviderError("当前纯 Python 版已内置单曲搜索/下载，歌单和专辑会在后续 Provider 中补齐")
+    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None) -> list[Song] | list[Collection]:
+        if search_type == SEARCH_TYPE_SONG:
+            return await self.search_songs(keyword, sources)
+        if search_type in {SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_ALBUM}:
+            return await self.search_collections(keyword, search_type, sources)
+        raise ProviderError(f"unsupported search type: {search_type}")
+
+    async def search_songs(self, keyword: str, sources: list[str] | None = None) -> list[Song]:
         if keyword.startswith("http://") or keyword.startswith("https://"):
             parsed = await self.parse_link(keyword)
             return [parsed] if parsed else []
@@ -369,11 +398,30 @@ class MusicAggregator:
             merged.extend(group)
         return merged[: self.page_size]
 
+    async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None) -> list[Collection]:
+        selected = self._selected_sources(sources)
+        tasks = [self._safe_search_collections(provider, keyword, search_type) for provider in selected]
+        groups = await asyncio.gather(*tasks)
+        merged: list[Collection] = []
+        for group in groups:
+            merged.extend(group)
+        return merged[: self.page_size]
+
     async def parse_link(self, link: str) -> Song | None:
         provider = self._provider_for_link(link)
         if not provider:
             return None
         return await provider.parse(link)
+
+    async def get_collection_songs(self, collection: Collection) -> list[Song]:
+        provider = self.providers.get(collection.source)
+        if not provider:
+            raise ProviderError(f"unsupported source: {collection.source}")
+        method = getattr(provider, "get_album_songs" if collection.kind == SEARCH_TYPE_ALBUM else "get_playlist_songs", None)
+        if not callable(method):
+            raise ProviderError(f"{collection.source} does not support expanding {collection.label}")
+        songs = await method(collection)
+        return songs[: self.page_size]
 
     async def switch_source(self, song: Song) -> Song:
         keyword = f"{song.name} {song.artist}".strip()
@@ -397,8 +445,31 @@ class MusicAggregator:
         try:
             return await provider.search(keyword, self.page_size)
         except Exception as exc:
-            logger.warning(f"[MusicDL] {provider.source} 搜索失败: {exc}")
+            logger.warning(f"[MusicDL] {provider.source} search failed: {exc}")
             return []
+
+    async def _safe_search_collections(self, provider: MusicProvider, keyword: str, search_type: str) -> list[Collection]:
+        method = getattr(provider, "search_album" if search_type == SEARCH_TYPE_ALBUM else "search_playlist", None)
+        if not callable(method):
+            return []
+        try:
+            return await method(keyword, self.page_size)
+        except NotImplementedError:
+            return []
+        except Exception as exc:
+            logger.warning(f"[MusicDL] {provider.source} {search_type} search failed: {exc}")
+            return []
+
+    def source_capabilities(self) -> dict[str, dict[str, bool]]:
+        result: dict[str, dict[str, bool]] = {}
+        for name, provider in self.providers.items():
+            result[name] = {
+                "song": callable(getattr(provider, "search", None)),
+                "playlist": _provider_supports(provider, "search_playlist_sync", "search_playlist"),
+                "album": _provider_supports(provider, "search_album_sync", "search_album"),
+                "default": name in DEFAULT_SOURCE_NAMES,
+            }
+        return result
 
     def _selected_sources(self, sources: list[str] | None) -> list[MusicProvider]:
         names = sources or DEFAULT_SOURCE_NAMES[:]
@@ -447,6 +518,376 @@ class MusicAggregator:
         return path, data
 
 
+
+
+def _json_extra(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _join_names(items: list[dict[str, Any]], key: str = "name") -> str:
+    return " / ".join(str(item.get(key) or "").strip() for item in items if item.get(key))
+
+
+def _provider_supports(provider: object, sync_name: str, async_name: str) -> bool:
+    cls_method = getattr(type(provider), sync_name, None)
+    base_method = getattr(MusicProvider, sync_name, None)
+    if cls_method is not None and cls_method is not base_method:
+        return True
+    method = getattr(provider, async_name, None)
+    return callable(method) and not isinstance(provider, MusicProvider)
+
+
+def _qq_search_album_sync(self: QQProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"format": "json", "p": 1, "n": limit, "w": keyword, "t": 8})
+    payload = self.get_json(f"http://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?{params}", {"User-Agent": UA_PC, "Referer": "https://y.qq.com/portal/search.html"})
+    rows = ((((payload or {}).get("data") or {}).get("album") or {}).get("list") or [])
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album_mid = str(item.get("albumMID") or "").strip()
+        if not album_mid:
+            continue
+        albums.append(Collection(
+            id=album_mid,
+            source="qq",
+            name=str(item.get("albumName") or ""),
+            creator=str(item.get("singerName") or ""),
+            cover=f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg",
+            kind=SEARCH_TYPE_ALBUM,
+            link=f"https://y.qq.com/n/ryqq/albumDetail/{album_mid}",
+            extra=_json_extra({"type": "album", "album_id": str(item.get("albumID") or ""), "album_mid": album_mid, "publish_time": str(item.get("publicTime") or "")}),
+        ))
+    return albums
+
+
+def _qq_search_playlist_sync(self: QQProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"query": keyword, "page_no": 0, "num_per_page": limit, "format": "json", "remoteplace": "txt.yqq.playlist", "flag_qc": 0})
+    data, _ = self.get_bytes(f"http://c.y.qq.com/soso/fcgi-bin/client_music_search_songlist?{params}", {"User-Agent": UA_PC, "Referer": "https://y.qq.com/portal/search.html"})
+    text = data.decode("utf-8", errors="replace")
+    if "(" in text and text.rstrip().endswith(")"):
+        text = text[text.index("(") + 1 : text.rindex(")")]
+    payload = json.loads(text)
+    rows = (((payload or {}).get("data") or {}).get("list") or [])
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        dissid = str(item.get("dissid") or "").strip()
+        if not dissid:
+            continue
+        cover = str(item.get("imgurl") or "")
+        if cover.startswith("http://"):
+            cover = cover.replace("http://", "https://", 1)
+        creator = ((item.get("creator") or {}).get("name") or "")
+        playlists.append(Collection(dissid, "qq", str(item.get("dissname") or ""), str(creator), cover, _safe_int(item.get("song_count")), SEARCH_TYPE_PLAYLIST, _safe_int(item.get("listennum")), "", f"https://y.qq.com/n/ryqq/playlist/{dissid}"))
+    return playlists
+
+
+def _qq_get_album_songs_sync(self: QQProvider, collection: Collection) -> list[Song]:
+    album_mid = _extra_collection(collection).get("album_mid") or collection.id
+    payload = {
+        "comm": {"ct": 24, "cv": 0},
+        "album": {"module": "music.musichallAlbum.AlbumSongList", "method": "GetAlbumSongList", "param": {"albumMid": album_mid, "begin": 0, "num": 100, "order": 2}},
+    }
+    result = self.post_json("https://u.y.qq.com/cgi-bin/musicu.fcg", payload, {"User-Agent": UA_PC, "Referer": "https://y.qq.com/"})
+    rows = ((((result or {}).get("album") or {}).get("data") or {}).get("songList") or [])
+    return [_qq_song_from_info((item or {}).get("songInfo") or {}) for item in rows if (item or {}).get("songInfo")]
+
+
+def _qq_get_playlist_songs_sync(self: QQProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"type": 1, "json": 1, "utf8": 1, "onlysong": 0, "disstid": collection.id, "format": "json", "g_tk": 5381, "loginUin": 0, "hostUin": 0, "inCharset": "utf8", "outCharset": "utf-8", "notice": 0, "platform": "yqq", "needNewCode": 0})
+    data, _ = self.get_bytes(f"http://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?{params}", {"User-Agent": UA_PC, "Referer": "https://y.qq.com/"})
+    text = data.decode("utf-8", errors="replace")
+    if "(" in text and text.rstrip().endswith(")"):
+        text = text[text.index("(") + 1 : text.rindex(")")]
+    payload = json.loads(text)
+    cdlist = (payload or {}).get("cdlist") or []
+    rows = (cdlist[0].get("songlist") if cdlist else []) or []
+    songs: list[Song] = []
+    for item in rows:
+        songmid = str(item.get("songmid") or "").strip()
+        if not songmid:
+            continue
+        album_mid = str(item.get("albummid") or "")
+        songs.append(Song(
+            id=songmid,
+            source="qq",
+            name=str(item.get("songname") or "Unknown"),
+            artist=_join_names(item.get("singer") or []) or "Unknown",
+            album=str(item.get("albumname") or ""),
+            cover=f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg" if album_mid else "",
+            duration=_safe_int(item.get("interval")),
+            extra=_json_extra({"songmid": songmid, "album_mid": album_mid}),
+            album_id=album_mid,
+            size=_safe_int(item.get("sizeflac") or item.get("size320") or item.get("size128")),
+            bitrate=320 if _safe_int(item.get("size320")) else 128,
+            link=f"https://y.qq.com/n/ryqq/songDetail/{songmid}",
+        ))
+    return songs
+
+
+def _qq_song_from_info(info: dict[str, Any]) -> Song:
+    songmid = str(info.get("mid") or "").strip()
+    album = info.get("album") or {}
+    album_mid = str(album.get("mid") or "")
+    file_info = info.get("file") or {}
+    return Song(
+        id=songmid,
+        source="qq",
+        name=str(info.get("name") or "Unknown"),
+        artist=_join_names(info.get("singer") or []) or "Unknown",
+        album=str(album.get("name") or ""),
+        cover=f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg" if album_mid else "",
+        duration=_safe_int(info.get("interval")),
+        extra=_json_extra({"songmid": songmid, "album_mid": album_mid, "album_id": str(album.get("id") or "")}),
+        album_id=album_mid,
+        size=_safe_int(file_info.get("size_flac") or file_info.get("size_320mp3") or file_info.get("size_128mp3")),
+        bitrate=320 if _safe_int(file_info.get("size_320mp3")) else 128,
+        link=f"https://y.qq.com/n/ryqq/songDetail/{songmid}",
+    )
+
+
+def _kuwo_search_collection(self: KuwoProvider, keyword: str, limit: int, kind: str) -> list[Collection]:
+    params = urlencode({"all": keyword, "ft": "album" if kind == SEARCH_TYPE_ALBUM else "playlist", "itemset": "web_2013", "client": "kt", "pcmp4": 1, "geo": "c", "vipver": 1, "pn": 0, "rn": limit, "rformat": "json", "encoding": "utf8"})
+    payload = self.get_json(f"http://search.kuwo.cn/r.s?{params}", {"User-Agent": UA_PC})
+    rows = (payload or {}).get("albumlist" if kind == SEARCH_TYPE_ALBUM else "abslist") or []
+    result: list[Collection] = []
+    for item in rows[:limit]:
+        if kind == SEARCH_TYPE_ALBUM:
+            cid = str(item.get("albumid") or item.get("id") or "").strip()
+            name = str(item.get("name") or "")
+            creator = str(item.get("aartist") or item.get("artist") or "")
+            cover = _normalize_url(str(item.get("hts_img") or item.get("img") or ""))
+            count = _safe_int(item.get("musiccnt"))
+            desc = str(item.get("info") or "")
+            link = f"http://www.kuwo.cn/album_detail/{cid}"
+        else:
+            cid = str(item.get("playlistid") or "").strip()
+            name = str(item.get("name") or "")
+            creator = str(item.get("nickname") or "")
+            cover = _normalize_url(str(item.get("pic") or "").replace("_150.", "_700."))
+            count = _safe_int(item.get("songnum"))
+            desc = str(item.get("intro") or "")
+            link = f"http://www.kuwo.cn/playlist_detail/{cid}"
+        if cid:
+            result.append(Collection(cid, "kuwo", name, creator, cover, count, kind, 0, desc, link, _json_extra({"type": kind, "id": cid})))
+    return result
+
+
+def _kuwo_search_album_sync(self: KuwoProvider, keyword: str, limit: int) -> list[Collection]:
+    return _kuwo_search_collection(self, keyword, limit, SEARCH_TYPE_ALBUM)
+
+
+def _kuwo_search_playlist_sync(self: KuwoProvider, keyword: str, limit: int) -> list[Collection]:
+    return _kuwo_search_collection(self, keyword, limit, SEARCH_TYPE_PLAYLIST)
+
+
+def _kuwo_get_playlist_songs_sync(self: KuwoProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"op": "getlistinfo", "pid": collection.id, "pn": 0, "rn": 100, "encode": "utf8", "keyset": "pl2012", "identity": "kuwo", "pcmp4": 1, "vipver": 1, "newver": 1})
+    payload = self.get_json(f"http://nplserver.kuwo.cn/pl.svc?{params}", {"User-Agent": UA_PC})
+    rows = (payload or {}).get("musiclist") or []
+    return [_kuwo_song_from_item(item) for item in rows if item.get("id")]
+
+
+def _kuwo_get_album_songs_sync(self: KuwoProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"pn": 0, "rn": 100, "stype": "albuminfo", "albumid": collection.id, "sortby": 0, "alflac": 1, "show_copyright_off": 1, "pcmp4": 1, "encoding": "utf8", "vipver": 1, "rformat": "json"})
+    payload = self.get_json(f"http://search.kuwo.cn/r.s?{params}", {"User-Agent": UA_PC})
+    rows = (payload or {}).get("musiclist") or (payload or {}).get("abslist") or []
+    songs = [_kuwo_song_from_item(item, collection) for item in rows if item.get("id") or item.get("MUSICRID")]
+    if songs:
+        return songs
+    return _kuwo_get_playlist_songs_sync(self, collection)
+
+
+def _kuwo_song_from_item(item: dict[str, Any], collection: Collection | None = None) -> Song:
+    rid = str(item.get("id") or item.get("MUSICRID") or "").replace("MUSIC_", "")
+    cover = _normalize_url(str(item.get("albumpic") or item.get("hts_MVPIC") or item.get("pic") or (collection.cover if collection else "")))
+    return Song(
+        id=rid,
+        source="kuwo",
+        name=str(item.get("name") or item.get("song_name") or item.get("SONGNAME") or "Unknown"),
+        artist=str(item.get("artist") or item.get("artist_name") or item.get("ARTIST") or "Unknown"),
+        album=str(item.get("album") or item.get("ALBUM") or (collection.name if collection and collection.kind == SEARCH_TYPE_ALBUM else "")),
+        cover=cover,
+        duration=_safe_int(item.get("duration") or item.get("DURATION")),
+        extra=_json_extra({"rid": rid, "album_id": collection.id if collection else ""}),
+        album_id=collection.id if collection and collection.kind == SEARCH_TYPE_ALBUM else "",
+        link=f"http://www.kuwo.cn/play_detail/{rid}",
+    )
+
+
+def _migu_search_album_sync(self: MiguProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"ua": "Android_migu", "version": "5.0.1", "text": keyword, "pageNo": 1, "pageSize": limit, "searchSwitch": json.dumps({"song": 0, "album": 1, "singer": 0, "tagSong": 0, "mvSong": 0, "songlist": 0, "bestShow": 1}, separators=(",", ":"))})
+    payload = self.get_json(f"http://pd.musicapp.migu.cn/MIGUM2.0/v1.0/content/search_all.do?{params}", {"User-Agent": UA_MOBILE, "Referer": "http://music.migu.cn/"})
+    rows = (((payload or {}).get("albumResultData") or {}).get("result") or [])
+    result: list[Collection] = []
+    for item in rows[:limit]:
+        cid = str(item.get("id") or "").strip()
+        if not cid:
+            continue
+        result.append(Collection(cid, "migu", str(item.get("name") or ""), str(item.get("singer") or ""), _migu_cover(item), 0, SEARCH_TYPE_ALBUM, 0, str(item.get("desc") or item.get("publishDate") or ""), f"https://music.migu.cn/v3/music/album/{cid}", _json_extra({"type": "album", "album_id": cid, "resource_type": str(item.get("resourceType") or "2003")})))
+    return result
+
+
+def _migu_search_playlist_sync(self: MiguProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"ua": "Android_migu", "version": "5.0.1", "text": keyword, "pageNo": 1, "pageSize": limit, "searchSwitch": json.dumps({"song": 0, "album": 0, "singer": 0, "tagSong": 0, "mvSong": 0, "songlist": 1, "bestShow": 1}, separators=(",", ":"))})
+    payload = self.get_json(f"http://pd.musicapp.migu.cn/MIGUM2.0/v1.0/content/search_all.do?{params}", {"User-Agent": UA_MOBILE, "Referer": "http://music.migu.cn/"})
+    rows = (((payload or {}).get("songListResultData") or {}).get("result") or [])
+    result: list[Collection] = []
+    for item in rows[:limit]:
+        cid = str(item.get("id") or "").strip()
+        if not cid:
+            continue
+        result.append(Collection(cid, "migu", str(item.get("name") or ""), str(item.get("userName") or ""), _migu_cover(item), _safe_int(item.get("musicNum")), SEARCH_TYPE_PLAYLIST, 0, "", "", _json_extra({"type": "playlist", "playlist_id": cid})))
+    return result
+
+
+def _migu_get_playlist_songs_sync(self: MiguProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"musicListId": collection.id, "pageNo": 1, "pageSize": 100})
+    payload = self.get_json(f"http://c.musicapp.migu.cn/MIGUM2.0/v1.0/content/musicListContent.do?{params}", {"User-Agent": UA_MOBILE, "Referer": "http://music.migu.cn/"})
+    rows = (payload or {}).get("contentList") or []
+    songs: list[Song] = []
+    for item in rows:
+        content_id = str(item.get("contentId") or item.get("songId") or "").strip()
+        if not content_id:
+            continue
+        cover = _normalize_url(str(item.get("picL") or item.get("picM") or ""))
+        songs.append(Song(content_id, "migu", str(item.get("songName") or "Unknown"), str(item.get("singerName") or "Unknown"), str(item.get("albumName") or ""), cover, 0, _json_extra({"content_id": content_id, "resource_type": "2", "format_type": "PQ", "copyright_id": str(item.get("copyrightId") or "")})))
+    return songs
+
+
+def _migu_get_album_songs_sync(self: MiguProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"albumId": collection.id, "pageNo": 1, "pageSize": 100})
+    payload = self.get_json(f"https://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/queryAlbumSong?{params}", {"User-Agent": UA_MOBILE, "Referer": "http://music.migu.cn/"})
+    rows = (((payload or {}).get("data") or {}).get("songList") or [])
+    songs = []
+    for item in rows:
+        song = self._song_from_item(item)
+        if song:
+            songs.append(song)
+    return songs
+
+
+def _migu_cover(item: dict[str, Any]) -> str:
+    images = item.get("imgItems") or item.get("albumImgs") or []
+    if images:
+        return _normalize_url(str((images[0] or {}).get("img") or ""))
+    return ""
+
+
+def _normalize_url(value: str) -> str:
+    value = value.strip()
+    if value.startswith("//"):
+        return "https:" + value
+    if value and not value.startswith("http"):
+        return "http://" + value
+    return value
+
+
+def _extra_collection(collection: Collection) -> dict[str, str]:
+    try:
+        parsed = json.loads(collection.extra or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+
+
+
+
+def _kugou_search_album_sync(self: KugouProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"keyword": keyword, "format": "json", "page": 1, "pagesize": limit})
+    payload = self.get_json(f"http://mobilecdn.kugou.com/api/v3/search/album?{params}", {"User-Agent": UA_MOBILE})
+    rows = (((payload or {}).get("data") or {}).get("info") or [])
+    albums: list[Collection] = []
+    for item in rows[:limit]:
+        album_id = str(item.get("albumid") or "").strip()
+        if not album_id:
+            continue
+        albums.append(Collection(album_id, "kugou", str(item.get("albumname") or ""), str(item.get("singername") or ""), str(item.get("imgurl") or "").replace("{size}", "240"), _safe_int(item.get("songcount")), SEARCH_TYPE_ALBUM, 0, str(item.get("intro") or ""), f"https://www.kugou.com/album/{album_id}.html", _json_extra({"type": "album", "album_id": album_id, "publish_time": str(item.get("publishtime") or "")})))
+    return albums
+
+
+def _kugou_search_playlist_sync(self: KugouProvider, keyword: str, limit: int) -> list[Collection]:
+    params = urlencode({"keyword": keyword, "platform": "WebFilter", "format": "json", "page": 1, "pagesize": limit, "filter": 0})
+    payload = self.get_json(f"http://mobilecdn.kugou.com/api/v3/search/special?{params}", {"User-Agent": UA_MOBILE})
+    rows = (((payload or {}).get("data") or {}).get("info") or [])
+    playlists: list[Collection] = []
+    for item in rows[:limit]:
+        playlist_id = str(item.get("specialid") or "").strip()
+        if not playlist_id:
+            continue
+        playlists.append(Collection(playlist_id, "kugou", str(item.get("specialname") or ""), str(item.get("nickname") or ""), str(item.get("imgurl") or "").replace("{size}", "240"), _safe_int(item.get("songcount")), SEARCH_TYPE_PLAYLIST, _safe_int(item.get("playcount")), str(item.get("intro") or ""), f"https://www.kugou.com/yy/special/single/{playlist_id}.html", _json_extra({"type": "playlist", "playlist_id": playlist_id, "publish_time": str(item.get("publishtime") or "")})))
+    return playlists
+
+
+def _kugou_get_album_songs_sync(self: KugouProvider, collection: Collection) -> list[Song]:
+    info_payload = self.get_json(f"http://mobilecdn.kugou.com/api/v3/album/info?albumid={collection.id}&version=9108&area_code=1", {"User-Agent": UA_MOBILE})
+    info = ((info_payload or {}).get("data") or {})
+    params = urlencode({"albumid": collection.id, "page": 1, "pagesize": 300, "version": 9108, "area_code": 1})
+    payload = self.get_json(f"http://mobilecdn.kugou.com/api/v3/album/song?{params}", {"User-Agent": UA_MOBILE})
+    rows = (((payload or {}).get("data") or {}).get("info") or [])
+    fallback_cover = str(info.get("imgurl") or collection.cover or "").replace("{size}", "240")
+    fallback_album = str(info.get("albumname") or collection.name or "")
+    return [_kugou_song_from_item(item, collection, fallback_cover, fallback_album) for item in rows if _kugou_song_hash(item)]
+
+
+def _kugou_get_playlist_songs_sync(self: KugouProvider, collection: Collection) -> list[Song]:
+    params = urlencode({"specialid": collection.id, "page": 1, "pagesize": 300, "version": 9108, "area_code": 1})
+    payload = self.get_json(f"http://mobilecdn.kugou.com/api/v3/special/song?{params}", {"User-Agent": UA_MOBILE})
+    rows = (((payload or {}).get("data") or {}).get("info") or [])
+    return [_kugou_song_from_item(item, collection, collection.cover, "") for item in rows if _kugou_song_hash(item)]
+
+
+def _kugou_song_hash(item: dict[str, Any]) -> str:
+    trans = item.get("trans_param") or {}
+    return _first(item.get("hash"), item.get("FileHash"), item.get("origin_hash"), item.get("SQFileHash"), item.get("sqhash"), item.get("HQFileHash"), item.get("320hash"), item.get("ResFileHash"), item.get("res_hash"), trans.get("ogg_320_hash"), trans.get("ogg_128_hash"))
+
+
+def _kugou_song_from_item(item: dict[str, Any], collection: Collection | None = None, fallback_cover: str = "", fallback_album: str = "") -> Song:
+    trans = item.get("trans_param") or {}
+    song_hash = _kugou_song_hash(item)
+    file_name = str(item.get("filename") or item.get("FileName") or "")
+    name = str(item.get("songname") or item.get("SongName") or "")
+    artist = str(item.get("singername") or item.get("SingerName") or "")
+    if (not name or not artist) and " - " in file_name:
+        artist, name = [part.strip() for part in file_name.split(" - ", 1)]
+    name = name or file_name or "Unknown"
+    artist = artist or "Unknown"
+    album = str(item.get("album_name") or item.get("AlbumName") or item.get("remark") or fallback_album or "")
+    cover = str(trans.get("union_cover") or item.get("Image") or fallback_cover or "").replace("{size}", "240")
+    duration = _safe_int(item.get("duration") or item.get("Duration"))
+    size = _safe_int(item.get("sqfilesize") or item.get("SQFileSize") or item.get("320filesize") or item.get("HQFileSize") or item.get("filesize") or item.get("FileSize"))
+    bitrate = int(size * 8 / 1000 / duration) if size and duration else 0
+    album_id = str(item.get("album_id") or item.get("AlbumID") or (collection.id if collection and collection.kind == SEARCH_TYPE_ALBUM else ""))
+    extra = {
+        "hash": song_hash,
+        "ogg_320_hash": str(trans.get("ogg_320_hash") or ""),
+        "ogg_128_hash": str(trans.get("ogg_128_hash") or ""),
+        "sq_hash": str(item.get("SQFileHash") or item.get("sqhash") or ""),
+        "file_hash": str(item.get("FileHash") or item.get("origin_hash") or ""),
+        "res_hash": str(item.get("ResFileHash") or item.get("res_hash") or ""),
+        "mv_hash": str(item.get("MvHash") or item.get("mvhash") or ""),
+        "hq_hash": str(item.get("HQFileHash") or item.get("320hash") or ""),
+        "album_id": album_id,
+        "privilege": str(item.get("Privilege") or item.get("privilege") or ""),
+    }
+    return Song(song_hash, "kugou", name, artist, album, cover, duration, _json_extra(extra), album_id, size, bitrate, link=f"https://www.kugou.com/song/#hash={song_hash}")
+
+KugouProvider.search_album_sync = _kugou_search_album_sync
+KugouProvider.search_playlist_sync = _kugou_search_playlist_sync
+KugouProvider.get_album_songs_sync = _kugou_get_album_songs_sync
+KugouProvider.get_playlist_songs_sync = _kugou_get_playlist_songs_sync
+QQProvider.search_album_sync = _qq_search_album_sync
+QQProvider.search_playlist_sync = _qq_search_playlist_sync
+QQProvider.get_album_songs_sync = _qq_get_album_songs_sync
+QQProvider.get_playlist_songs_sync = _qq_get_playlist_songs_sync
+KuwoProvider.search_album_sync = _kuwo_search_album_sync
+KuwoProvider.search_playlist_sync = _kuwo_search_playlist_sync
+KuwoProvider.get_album_songs_sync = _kuwo_get_album_songs_sync
+KuwoProvider.get_playlist_songs_sync = _kuwo_get_playlist_songs_sync
+MiguProvider.search_album_sync = _migu_search_album_sync
+MiguProvider.search_playlist_sync = _migu_search_playlist_sync
+MiguProvider.get_album_songs_sync = _migu_get_album_songs_sync
+MiguProvider.get_playlist_songs_sync = _migu_get_playlist_songs_sync
 
 def _normalize_cookies(value: object) -> dict[str, str]:
     if isinstance(value, dict):
