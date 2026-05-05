@@ -29,7 +29,7 @@ class Song:
 
     @property
     def title(self) -> str:
-        artist = self.artist or "????"
+        artist = self.artist or "未知歌手"
         return f"{self.name or 'Unknown'} - {artist}"
 
 
@@ -49,7 +49,7 @@ class Collection:
 
     @property
     def label(self) -> str:
-        return "??" if self.kind == SEARCH_TYPE_ALBUM else "??"
+        return "专辑" if self.kind == SEARCH_TYPE_ALBUM else "歌单"
 
 
 @dataclass

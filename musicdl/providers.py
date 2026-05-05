@@ -509,8 +509,12 @@ class MusicAggregator:
             data = source.post_process(data)
         if self.max_download_bytes > 0 and len(data) > self.max_download_bytes:
             raise ProviderError(f"音频文件过大：{len(data) / 1024 / 1024:.1f} MB")
-        content_type = response_headers.get("Content-Type", "").split(";", 1)[0].strip()
-        ext = getattr(source, "extension", "") or _ext_from_url_or_type(source.url, content_type)
+        content_type = response_headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        detected_ext = _detect_audio_ext(data)
+        if not _looks_like_audio(data, content_type, detected_ext):
+            preview = _download_error_preview(data)
+            raise ProviderError(f"下载结果不是可用音频：content-type={content_type or '-'}，内容开头={preview}")
+        ext = getattr(source, "extension", "") or detected_ext or _ext_from_url_or_type(source.url, content_type)
         filename = _safe_filename(f"{song.name} - {song.artist}.{ext}")
         path = self.download_dir / filename
         if path.exists():
@@ -918,6 +922,45 @@ def parse_sources(value: object) -> list[str]:
     if any(part in {"default", "默认"} for part in parts):
         return DEFAULT_SOURCE_NAMES[:]
     return [part for part in parts if part in ALL_SOURCE_NAMES]
+
+
+def _detect_audio_ext(data: bytes) -> str:
+    head = data[:64]
+    if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "mp3"
+    if head.startswith(b"fLaC"):
+        return "flac"
+    if head.startswith(b"OggS"):
+        return "ogg"
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return "wav"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xF0) == 0xF0:
+        return "aac"
+    if b"ftyp" in head[:16]:
+        return "m4a"
+    return ""
+
+
+def _looks_like_audio(data: bytes, content_type: str, detected_ext: str) -> bool:
+    if not data:
+        return False
+    content_type = (content_type or "").lower()
+    stripped = data[:256].lstrip().lower()
+    if stripped.startswith((b"<!doctype html", b"<html", b"{", b"[")):
+        return False
+    if content_type.startswith(("audio/", "video/")):
+        return True
+    if content_type in {"", "application/octet-stream", "binary/octet-stream"}:
+        return bool(detected_ext)
+    if content_type in {"application/json", "text/html", "text/plain", "application/vnd.apple.mpegurl", "application/x-mpegurl"}:
+        return False
+    return bool(detected_ext)
+
+
+def _download_error_preview(data: bytes) -> str:
+    text = data[:160].decode("utf-8", errors="replace")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:120] or "空内容"
 
 
 def _http_bytes(url: str, headers: dict[str, str], timeout: float) -> tuple[bytes, dict[str, str]]:

@@ -207,44 +207,90 @@ class MusicDLPlugin(Star):
                 logger.warning(f"[MusicDL] 下载失败: {song.title}: {exc}")
                 yield event.plain_result(f"下载失败：{song.title}\n原因：{exc}")
                 continue
-            yield event.chain_result([Plain(f"🎵 {song.title}\n来源：{song.source}"), Record.fromFileSystem(str(downloaded.path))])
-            if not self.download_to_local:
+            sent = False
+            try:
+                await event.send(MessageChain([Plain(f"{song.title}\n来源：{song.source}"), Record.fromFileSystem(str(downloaded.path))]))
+                sent = True
+            except Exception as send_exc:
+                logger.warning(f"[MusicDL] 音频发送失败: {song.title}: {send_exc}")
+                yield event.plain_result(f"音频发送失败：{song.title}\n原因：{send_exc}\n文件已保存：{downloaded.path}")
+            if sent and not self.download_to_local:
                 self._cleanup_downloaded_file(downloaded.path)
 
     def _format_song_list(self, keyword: str, songs: list[Song], prefix: str = "") -> str:
         lines = []
         if prefix:
             lines.append(prefix)
-        lines.append(f"找到 {len(songs)} 首：{keyword}")
+        lines.append(f"找到 {len(songs)} 首歌曲：{keyword}")
+        lines.append(f"第 1/1 页，每页 {self.music.page_size} 条")
+        rows = []
         for i, song in enumerate(songs, 1):
-            parts = [f"[{song.source}] {song.title}"]
-            if song.album:
-                parts.append(song.album)
-            duration = self._format_duration(song.duration)
-            if duration:
-                parts.append(duration)
-            if song.bitrate:
-                parts.append(f"{song.bitrate}kbps")
-            if song.ext:
-                parts.append(song.ext)
-            lines.append(f"{i}. " + " · ".join(parts))
-        lines.append("\n回复编号下载，例如：1。回复 1 2 可批量下载。回复 r1 可给第 1 首换源。回复 取消 结束。")
+            rows.append([
+                "[ ]",
+                str(i),
+                song.name or "Unknown",
+                song.artist or '未知歌手',
+                song.album or "-",
+                self._format_duration(song.duration) or "-",
+                '!无效' if song.is_invalid else self._format_size(song.size),
+                f"{song.bitrate} kbps" if song.bitrate else "-",
+                song.source or "-",
+            ])
+        lines.extend(self._format_markdown_table(['[选]', 'ID', '歌名', '歌手', '专辑', '时长', '大小', '码率', '来源'], rows))
+        lines.append('\n回复编号下载，例如：1。回复 1 2 可批量下载。回复 r1 可给第 1 首换源。回复 取消 结束。')
         return "\n".join(lines)
 
     def _format_collection_list(self, keyword: str, collections: list[Collection]) -> str:
-        label = collections[0].label if collections else "集合"
+        label = collections[0].label if collections else '集合'
+        kind = collections[0].kind if collections else SEARCH_TYPE_PLAYLIST
         lines = [f"找到 {len(collections)} 个{label}：{keyword}"]
+        lines.append(f"第 1/1 页，每页 {self.music.page_size} 条")
+        rows = []
         for i, collection in enumerate(collections, 1):
-            parts = [f"[{collection.source}] {collection.name or collection.id}"]
-            if collection.creator:
-                parts.append(collection.creator)
-            if collection.track_count:
-                parts.append(f"{collection.track_count} 首")
-            if collection.play_count:
-                parts.append(f"播放 {collection.play_count}")
-            lines.append(f"{i}. " + " · ".join(parts))
+            rows.append([
+                str(i),
+                collection.name or collection.id,
+                str(collection.track_count) if collection.track_count else "-",
+                collection.creator or "-",
+                collection.source or "-",
+            ])
+        headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), '来源']
+        lines.extend(self._format_markdown_table(headers, rows))
         lines.append(f"\n回复编号展开{label}歌曲，例如：1。回复 取消 结束。")
         return "\n".join(lines)
+
+    def _format_markdown_table(self, headers: list[str], rows: list[list[object]]) -> list[str]:
+        table = ["| " + " | ".join(self._safe_markdown_cell(item) for item in headers) + " |"]
+        table.append("| " + " | ".join("---" for _ in headers) + " |")
+        for row in rows:
+            table.append("| " + " | ".join(self._safe_markdown_cell(item) for item in row) + " |")
+        return table
+
+    def _safe_markdown_cell(self, value: object) -> str:
+        text = str(value if value is not None else "-").replace("\n", " " ).replace("|", "\\|").strip()
+        return text or "-"
+
+    def _format_size(self, size: int) -> str:
+        if size <= 0:
+            return "-"
+        units = ["B", "KB", "MB", "GB"]
+        value = float(size)
+        index = 0
+        while value >= 1024 and index < len(units) - 1:
+            value /= 1024
+            index += 1
+        if index == 0:
+            return f"{int(value)} {units[index]}"
+        return f"{value:.1f} {units[index]}"
+
+    def _collection_count_label(self, search_type: str) -> str:
+        return '曲目数' if search_type == SEARCH_TYPE_ALBUM else '歌曲数'
+
+    def _collection_creator_label(self, search_type: str) -> str:
+        return '歌手' if search_type == SEARCH_TYPE_ALBUM else '创建者'
+
+    def _yes_no(self, value: object) -> str:
+        return '是' if bool(value) else '否'
 
     def _help_text(self) -> str:
         return "\n".join([
