@@ -329,18 +329,22 @@ class MusicDLPlugin(Star):
         page_size = page_size or self.music.page_size
         start, end = self._page_bounds(page, page_size, len(songs))
         visible = songs[start:end]
+        total_page = self._page_total(len(songs), page_size)
         lines = []
         if prefix:
-            lines.append(prefix)
-        lines.append(f"找到 {len(visible)} 首歌: {keyword}")
-        lines.append(f"第 {page}/{self._page_total(len(songs), page_size)} 页, 每页 {page_size} 条, 已加载 {len(songs)} 条")
+            lines.extend([prefix, ""])
+        lines.append(f"**找到 {len(visible)} 首歌**：{keyword}")
+        lines.append(f"**分页**：第 `{page}/{total_page}` 页 · 每页 `{page_size}` 条 · 已加载 `{len(songs)}` 条")
         sources = self._page_sources(visible) or self._page_sources(songs)
         if sources:
-            lines.append("来源: " + ", ".join(sources))
+            lines.append("**渠道**：" + ", ".join(f"`{source}`" for source in sources))
+        invalid_count = sum(1 for item in visible if item.is_invalid)
+        lines.append(f"**歌曲状态**：✅ 有效 `{len(visible) - invalid_count}` 首，❌ 无效 `{invalid_count}` 首")
         rows = []
         for offset, song in enumerate(visible, start + 1):
             rows.append([
                 str(offset),
+                self._song_status(song),
                 self._truncate_text(song.name or "Unknown", 25),
                 self._truncate_text(song.artist or "未知歌手", 15),
                 self._truncate_text(song.album or "-", 15),
@@ -348,23 +352,31 @@ class MusicDLPlugin(Star):
                 self._format_size(song.size),
                 f"{song.bitrate} kbps" if song.bitrate else "-",
                 song.source or "-",
-                self._song_status(song),
             ])
-        lines.extend(self._format_markdown_table(["ID", "歌名", "歌手", "专辑", "时长", "大小", "码率", "渠道", "状态"], rows))
-        lines.append("\n回复编号下载, 例如: 1. 回复 1 2 可批量下载. 回复 n/下一页, p/上一页, page 2 可翻页. 回复 r1 可给第 1 首歌换源. 回复取消结束.")
-        return "\n".join(lines)
-
+        lines.append("")
+        lines.extend(self._format_markdown_table(["ID", "歌曲状态", "歌名", "歌手", "专辑", "时长", "大小", "码率", "渠道"], rows))
+        lines.extend([
+            "",
+            "**操作**",
+            "- 回复 `1` 下载第 1 首；回复 `1 2` 批量下载。",
+            "- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。",
+            "- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。",
+            "- 回复 `r1` / `换源1` 给第 1 首歌换源。",
+            "- 回复 `取消` 或 `/music_cancel` 结束。",
+        ])
+        return '\n'.join(lines)
     def _format_collection_list(self, keyword: str, collections: list[Collection], page: int = 1, page_size: int | None = None) -> str:
         page_size = page_size or self.music.page_size
         start, end = self._page_bounds(page, page_size, len(collections))
         visible = collections[start:end]
         label = collections[0].label if collections else "集合"
         kind = collections[0].kind if collections else SEARCH_TYPE_PLAYLIST
-        lines = [f"找到 {len(visible)} 个{label}: {keyword}"]
-        lines.append(f"第 {page}/{self._page_total(len(collections), page_size)} 页, 每页 {page_size} 条, 已加载 {len(collections)} 条")
+        total_page = self._page_total(len(collections), page_size)
+        lines = [f"**找到 {len(visible)} 个{label}**：{keyword}"]
+        lines.append(f"**分页**：第 `{page}/{total_page}` 页 · 每页 `{page_size}` 条 · 已加载 `{len(collections)}` 条")
         sources = self._page_sources(visible) or self._page_sources(collections)
         if sources:
-            lines.append("来源: " + ", ".join(sources))
+            lines.append("**渠道**：" + ", ".join(f"`{source}`" for source in sources))
         rows = []
         for offset, collection in enumerate(visible, start + 1):
             rows.append([
@@ -375,10 +387,16 @@ class MusicDLPlugin(Star):
                 collection.source or "-",
             ])
         headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), "渠道"]
+        lines.append("")
         lines.extend(self._format_markdown_table(headers, rows))
-        lines.append(f"\n回复编号展开, 例如: 1. 回复 n/下一页, p/上一页, page 2 可翻页. 回复取消结束.")
-        return "\n".join(lines)
-
+        lines.extend([
+            "",
+            "**操作**",
+            "- 回复 `1` 展开第 1 个结果。",
+            "- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。",
+            "- 回复 `取消` 或 `/music_cancel` 结束。",
+        ])
+        return '\n'.join(lines)
     def _truncate_text(self, value: object, limit: int) -> str:
         text = str(value if value is not None else "").strip()
         if len(text) <= limit:
@@ -547,7 +565,7 @@ class MusicDLPlugin(Star):
         return sorted({item.source for item in items if getattr(item, "source", "")})
 
     def _song_status(self, song: Song) -> str:
-        return "无效" if song.is_invalid else "有效"
+        return "❌ 无效" if song.is_invalid else "✅ 有效"
 
     def _extract_supported_music_link(self, text: str) -> str:
         for match in re.finditer(r"https?://[^\s]+", text or ""):

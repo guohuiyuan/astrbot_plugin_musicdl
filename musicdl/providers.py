@@ -47,6 +47,28 @@ def _decode_response_body(data: bytes, headers: dict[str, str]) -> bytes:
     return data
 
 
+def _decode_json_text(data: bytes, headers: dict[str, str]) -> str:
+    content_type = str(headers.get("Content-Type") or headers.get("content-type") or "")
+    match = re.search(r"charset=([A-Za-z0-9_\-]+)", content_type, re.IGNORECASE)
+    encodings = []
+    if match:
+        encodings.append(match.group(1))
+    encodings.extend(["utf-8", "gb18030", "gbk"])
+    seen = set()
+    for encoding in encodings:
+        key = encoding.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        except LookupError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 class ProviderError(RuntimeError):
     pass
 
@@ -109,9 +131,8 @@ class MusicProvider:
         raise NotImplementedError
 
     def get_json(self, url: str, headers: dict[str, str] | None = None, *, no_redirect: bool = False) -> Any:
-        data, _ = self.get_bytes(url, headers=headers, no_redirect=no_redirect)
-        text = data.decode("utf-8", errors="replace")
-        return json.loads(text)
+        data, response_headers = self.get_bytes(url, headers=headers, no_redirect=no_redirect)
+        return json.loads(_decode_json_text(data, response_headers))
 
     def post_json(self, url: str, payload: Any, headers: dict[str, str] | None = None) -> Any:
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -125,7 +146,7 @@ class MusicProvider:
             with urlopen(req, timeout=self.timeout) as resp:
                 headers = dict(resp.headers.items())
                 data = _decode_response_body(resp.read(), headers)
-                return json.loads(data.decode("utf-8", errors="replace"))
+                return json.loads(_decode_json_text(data, headers))
         except (HTTPError, URLError) as exc:
             raise ProviderError(str(exc)) from exc
 
@@ -260,20 +281,90 @@ class KugouProvider(MusicProvider):
         match = re.search(r"(?i)hash=([a-f0-9]{32})", link)
         if not match:
             return None
-        hash_value = match.group(1)
-        return Song(hash_value, self.source, f"Kugou_{hash_value[:8]}", "Unknown", extra=json.dumps({"hash": hash_value}, ensure_ascii=False))
+        hash_value = match.group(1).upper()
+        return Song(hash_value, self.source, f"Kugou_{hash_value[:8]}", "Unknown", extra=json.dumps({"hash": hash_value}, ensure_ascii=False), link=link)
+
+    def _play_info_headers(self) -> list[dict[str, str]]:
+        return [
+            {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 Version/13.0.3 Mobile/15E148 Safari/604.1", "Referer": "http://m.kugou.com"},
+            {"User-Agent": UA_MOBILE, "Referer": "http://m.kugou.com"},
+            {"User-Agent": UA_PC, "Referer": "https://www.kugou.com/"},
+        ]
+
+    def _url_candidates_from_play_info(self, payload: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for key in ("url", "play_url", "audio_url", "fileUrl", "file_url"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+        for key in ("backup_url", "backupUrl", "backup_urls"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidates.extend(str(item).strip() for item in value if str(item or "").strip())
+            elif isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+        return list(dict.fromkeys(candidates))
+
+    def _fill_song_from_play_info(self, song: Song, payload: dict[str, Any], hash_value: str) -> None:
+        file_name = str(payload.get("fileName") or "").strip()
+        artist = _first(payload.get("author_name"), payload.get("singerName"), payload.get("singername"))
+        name = _first(payload.get("songName"), payload.get("songname"))
+        if (not artist or not name) and " - " in file_name:
+            artist_part, name_part = [part.strip() for part in file_name.split(" - ", 1)]
+            artist = artist or artist_part
+            name = name or name_part
+        if song.name.startswith("Kugou_") and name:
+            song.name = name
+        if song.artist == "Unknown" and artist:
+            song.artist = artist
+        album = _first(payload.get("album_name"), payload.get("albumName"), payload.get("albumname"))
+        if not song.album and album:
+            song.album = album
+        cover = _first(payload.get("imgUrl"), payload.get("image"), payload.get("album_img"))
+        if cover and not song.cover:
+            song.cover = cover.replace("{size}", "240")
+        duration = _safe_int(payload.get("timeLength") or payload.get("duration"))
+        if duration and not song.duration:
+            song.duration = duration
+        size = _safe_int(payload.get("fileSize") or payload.get("file_size"))
+        if size and not song.size:
+            song.size = size
+        bitrate = _safe_int(payload.get("bitRate") or payload.get("bitrate"))
+        if bitrate and not song.bitrate:
+            song.bitrate = bitrate
+        ext = str(payload.get("extName") or payload.get("ext") or "").strip().lstrip(".")
+        if ext and not song.ext:
+            song.ext = ext
+        extra = _extra(song)
+        extra.update({
+            "hash": hash_value,
+            "audio_id": str(payload.get("audio_id") or extra.get("audio_id") or ""),
+            "album_id": str(payload.get("req_albumid") or payload.get("album_id") or extra.get("album_id") or ""),
+            "privilege": str(payload.get("privilege") or extra.get("privilege") or ""),
+            "status": str(payload.get("status") or ""),
+            "errcode": str(payload.get("errcode") or ""),
+        })
+        song.extra = json.dumps(extra, ensure_ascii=False)
+        if not song.link:
+            song.link = f"https://www.kugou.com/song/#hash={hash_value}"
 
     def get_download_url_sync(self, song: Song) -> SourceResponse:
-        hash_value = _extra(song).get("hash") or song.id
+        hash_value = (_extra(song).get("hash") or song.id).upper()
         params = urlencode({"cmd": "playInfo", "hash": hash_value})
-        payload = self.get_json(
-            f"http://m.kugou.com/app/i/getSongInfo.php?{params}",
-            {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 Version/13.0.3 Mobile/15E148 Safari/604.1", "Referer": "http://m.kugou.com"},
-        )
-        url = str((payload or {}).get("url") or "").strip()
-        if not url:
-            raise ProviderError("酷狗未返回可用下载地址，可能触发风控或歌曲受限")
-        return SourceResponse(url, {"Referer": "http://m.kugou.com", "User-Agent": UA_MOBILE})
+        api_url = f"http://m.kugou.com/app/i/getSongInfo.php?{params}"
+        last_status = ""
+        for headers in self._play_info_headers():
+            payload = self.get_json(api_url, headers)
+            if isinstance(payload, dict):
+                self._fill_song_from_play_info(song, payload, hash_value)
+                candidates = self._url_candidates_from_play_info(payload)
+                if candidates:
+                    return SourceResponse(candidates[0], {"Referer": headers.get("Referer", "http://m.kugou.com"), "User-Agent": headers.get("User-Agent", UA_MOBILE)}, song.ext)
+                last_status = f"status={payload.get('status')}, errcode={payload.get('errcode')}"
+            time.sleep(0.2)
+        if last_status:
+            raise ProviderError("酷狗未返回可用下载地址，" + last_status + "，可能触发风控或歌曲受限")
+        raise ProviderError("酷狗未返回可用下载地址，可能触发风控或歌曲受限")
 
 
 class KuwoProvider(MusicProvider):
