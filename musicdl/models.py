@@ -56,8 +56,12 @@ class Collection:
 class SelectionState:
     keyword: str = ""
     search_type: str = SEARCH_TYPE_SONG
+    sources: list[str] | None = None
     songs: list[Song] = field(default_factory=list)
     collections: list[Collection] = field(default_factory=list)
+    page: int = 1
+    page_size: int = 50
+    reloadable: bool = True
     created_at: float = 0
 
 

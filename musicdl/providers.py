@@ -397,37 +397,33 @@ class MusicAggregator:
             "bilibili": BilibiliProvider(str(cookies.get("bilibili", "")), self.timeout),
         }
 
-    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None) -> list[Song] | list[Collection]:
+    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None, limit: int | None = None) -> list[Song] | list[Collection]:
         if search_type == SEARCH_TYPE_SONG:
-            return await self.search_songs(keyword, sources)
+            return await self.search_songs(keyword, sources, limit)
         if search_type in {SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_ALBUM}:
-            return await self.search_collections(keyword, search_type, sources)
+            return await self.search_collections(keyword, search_type, sources, limit)
         raise ProviderError(f"unsupported search type: {search_type}")
 
-    async def search_songs(self, keyword: str, sources: list[str] | None = None) -> list[Song]:
+    async def search_songs(self, keyword: str, sources: list[str] | None = None, limit: int | None = None) -> list[Song]:
+        result_limit = max(1, limit or self.page_size)
         if keyword.startswith("http://") or keyword.startswith("https://"):
             parsed = await self.parse_link(keyword)
             if parsed:
                 await self.probe_song(parsed)
             return [parsed] if parsed else []
-        selected = self._selected_sources(sources)
-        tasks = [self._safe_search(provider, keyword) for provider in selected]
+        selected = self._selected_sources(sources, SEARCH_TYPE_SONG)
+        tasks = [self._safe_search(provider, keyword, result_limit) for provider in selected]
         groups = await asyncio.gather(*tasks)
-        merged: list[Song] = []
-        for group in groups:
-            merged.extend(group)
-        result = merged[: self.page_size]
+        result = _round_robin_merge(groups, result_limit)
         await self.probe_songs(result)
         return result
 
-    async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None) -> list[Collection]:
-        selected = self._selected_sources(sources)
-        tasks = [self._safe_search_collections(provider, keyword, search_type) for provider in selected]
+    async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None, limit: int | None = None) -> list[Collection]:
+        result_limit = max(1, limit or self.page_size)
+        selected = self._selected_sources(sources, search_type)
+        tasks = [self._safe_search_collections(provider, keyword, search_type, result_limit) for provider in selected]
         groups = await asyncio.gather(*tasks)
-        merged: list[Collection] = []
-        for group in groups:
-            merged.extend(group)
-        return merged[: self.page_size]
+        return _round_robin_merge(groups, result_limit)
 
     async def parse_link(self, link: str) -> Song | None:
         provider = self._provider_for_link(link)
@@ -527,9 +523,9 @@ class MusicAggregator:
             song.is_invalid = True
         return song
 
-    async def _safe_search(self, provider: MusicProvider, keyword: str) -> list[Song]:
+    async def _safe_search(self, provider: MusicProvider, keyword: str, limit: int) -> list[Song]:
         try:
-            songs = await provider.search(keyword, self.page_size)
+            songs = await provider.search(keyword, limit)
             for song in songs:
                 if not song.source:
                     song.source = provider.source
@@ -538,12 +534,12 @@ class MusicAggregator:
             logger.warning(f"[MusicDL] {provider.source} search failed: {exc}")
             return []
 
-    async def _safe_search_collections(self, provider: MusicProvider, keyword: str, search_type: str) -> list[Collection]:
+    async def _safe_search_collections(self, provider: MusicProvider, keyword: str, search_type: str, limit: int) -> list[Collection]:
         method = getattr(provider, "search_album" if search_type == SEARCH_TYPE_ALBUM else "search_playlist", None)
         if not callable(method):
             return []
         try:
-            collections = await method(keyword, self.page_size)
+            collections = await method(keyword, limit)
             for collection in collections:
                 if not collection.source:
                     collection.source = provider.source
@@ -567,10 +563,13 @@ class MusicAggregator:
             }
         return result
 
-    def _selected_sources(self, sources: list[str] | None) -> list[MusicProvider]:
-        names = sources or DEFAULT_SOURCE_NAMES[:]
+    def _selected_sources(self, sources: list[str] | None, search_type: str = SEARCH_TYPE_SONG) -> list[MusicProvider]:
+        names = sources or _default_sources_for_search_type(search_type)
         providers = [self.providers[name] for name in names if name in self.providers]
-        return providers or [self.providers[name] for name in DEFAULT_SOURCE_NAMES if name in self.providers]
+        return providers or [self.providers[name] for name in _default_sources_for_search_type(search_type) if name in self.providers]
+
+    def supports_link(self, link: str) -> bool:
+        return self._provider_for_link(link) is not None
 
     def _provider_for_link(self, link: str) -> MusicProvider | None:
         lower = link.lower()
@@ -1081,6 +1080,26 @@ def _http_bytes(url: str, headers: dict[str, str], timeout: float) -> tuple[byte
         raise ProviderError(body.strip() or f"HTTP {exc.code}") from exc
     except URLError as exc:
         raise ProviderError(str(exc.reason)) from exc
+
+
+def _default_sources_for_search_type(search_type: str) -> list[str]:
+    if search_type == SEARCH_TYPE_PLAYLIST:
+        return [name for name in ALL_SOURCE_NAMES if name not in UNAVAILABLE_PLAYLIST_SOURCE_NAMES]
+    if search_type == SEARCH_TYPE_ALBUM:
+        return ["netease", "qq", "kugou", "kuwo", "migu", "jamendo", "joox", "qianqian", "soda"]
+    return DEFAULT_SOURCE_NAMES[:]
+
+
+def _round_robin_merge(groups: list[list[Any]], limit: int) -> list[Any]:
+    merged: list[Any] = []
+    max_len = max((len(group) for group in groups), default=0)
+    for index in range(max_len):
+        for group in groups:
+            if index < len(group):
+                merged.append(group[index])
+                if len(merged) >= limit:
+                    return merged
+    return merged
 
 
 def _header_value(headers: dict[str, str], name: str) -> str:

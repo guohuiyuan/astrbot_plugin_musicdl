@@ -64,17 +64,18 @@ class MusicDLPlugin(Star):
             yield event.plain_result(self._help_text())
             return
 
-        keyword, sources, search_type = self._parse_search_options(text)
+        keyword, sources, search_type, page, page_size = self._parse_search_options(text)
         if not keyword:
             yield event.plain_result(self._help_text())
             return
 
-        await event.send(MessageChain([Plain(f"正在搜索{self._search_type_label(search_type)}：{keyword}")]))
+        limit = self._loaded_limit(page, page_size)
+        await event.send(MessageChain([Plain(f"正在搜索{self._search_type_label(search_type)}: {keyword}")]))
         try:
-            results = await self.music.search(keyword, search_type, sources)
+            results = await self.music.search(keyword, search_type, sources, limit=limit)
         except Exception as exc:
             logger.warning(f"[MusicDL] 搜索失败: {exc}")
-            yield event.plain_result(f"搜索失败：{exc}")
+            yield event.plain_result(f"搜索失败: {exc}")
             return
 
         if search_type == SEARCH_TYPE_SONG:
@@ -86,16 +87,43 @@ class MusicDLPlugin(Star):
                 async for result in self._download_and_send(event, [songs[0]]):
                     yield result
                 return
-            self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=search_type, songs=songs, created_at=time.time())
-            yield event.plain_result(self._format_song_list(keyword, songs))
+            self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=search_type, sources=sources, songs=songs, page=page, page_size=page_size, reloadable=True, created_at=time.time())
+            yield event.plain_result(self._format_song_list(keyword, songs, page=page, page_size=page_size))
             return
 
         collections = [item for item in results if isinstance(item, Collection)]
         if not collections:
             yield event.plain_result(f"没有找到可用{self._search_type_label(search_type)}。")
             return
-        self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=search_type, collections=collections, created_at=time.time())
-        yield event.plain_result(self._format_collection_list(keyword, collections))
+        self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=search_type, sources=sources, collections=collections, page=page, page_size=page_size, reloadable=True, created_at=time.time())
+        yield event.plain_result(self._format_collection_list(keyword, collections, page=page, page_size=page_size))
+
+    @filter.regex(r".*https?://[^\s]+.*")
+    async def music_direct_link(self, event: AstrMessageEvent):
+        raw = event.message_str or ""
+        if self._strip_command(raw, {"music", "musicdl", "点歌", "搜歌"}) != raw.strip():
+            return
+        link = self._extract_supported_music_link(raw)
+        if not link:
+            return
+        event.stop_event()
+        await event.send(MessageChain([Plain(f"正在解析链接点歌: {link}")]))
+        try:
+            results = await self.music.search(link, SEARCH_TYPE_SONG, None, limit=1)
+        except Exception as exc:
+            logger.warning(f"[MusicDL] 链接解析失败: {exc}")
+            yield event.plain_result(f"链接解析失败: {exc}")
+            return
+        songs = [item for item in results if isinstance(item, Song)]
+        if not songs:
+            yield event.plain_result("暂不支持该链接的点歌解析。")
+            return
+        async for result in self._download_and_send(event, [songs[0]]):
+            yield result
+
+    @filter.command("music_help", alias={"点歌帮助", "搜歌帮助"})
+    async def music_help(self, event: AstrMessageEvent):
+        yield event.plain_result(self._help_text())
 
     @filter.command("music_sources", alias={"点歌源"})
     async def music_sources(self, event: AstrMessageEvent):
@@ -121,7 +149,7 @@ class MusicDLPlugin(Star):
         self.sessions.pop(event.unified_msg_origin, None)
         yield event.plain_result("已取消当前点歌选择。")
 
-    @filter.regex(r"^\s*(?:\d+(?:[\s,，]+\d+)*|a|all|全部|取消|q|r\s*\d+|换源\s*\d+)\s*$")
+    @filter.regex(r"^\s*(?:\d+(?:[\s,，]+\d+)*|a|all|全部|取消|q|r\s*\d+|换源\s*\d+|n|next|下一页|下页|p|prev|previous|上一页|上页|page\s*\d+|第\s*\d+\s*页)\s*$")
     async def music_selection(self, event: AstrMessageEvent):
         self._cleanup_sessions()
         state = self.sessions.get(event.unified_msg_origin)
@@ -135,10 +163,24 @@ class MusicDLPlugin(Star):
             yield event.plain_result("已取消当前点歌选择。")
             return
 
+        page = self._parse_page_command(text, state)
+        if page is not None:
+            if page < 1:
+                yield event.plain_result("已经是第一页。")
+                return
+            try:
+                message = await self._format_state_page(state, page)
+            except Exception as exc:
+                logger.warning(f"[MusicDL] 翻页失败: {exc}")
+                yield event.plain_result(f"翻页失败: {exc}")
+                return
+            yield event.plain_result(message)
+            return
+
         if state.collections:
             indices = self._parse_indices(text, len(state.collections))
             if not indices:
-                yield event.plain_result("请选择有效编号，例如：1 或 1 2。")
+                yield event.plain_result("请选择有效编号, 例如: 1 或 1 2.")
                 return
             selected = [state.collections[i - 1] for i in indices]
             await event.send(MessageChain([Plain(f"正在展开 {len(selected)} 个{selected[0].label}...")]))
@@ -158,11 +200,11 @@ class MusicDLPlugin(Star):
                 yield event.plain_result(message)
                 return
             keyword = "，".join(collection.name for collection in selected if collection.name) or state.keyword
-            self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=SEARCH_TYPE_SONG, songs=songs, created_at=time.time())
+            self.sessions[event.unified_msg_origin] = SelectionState(keyword=keyword, search_type=SEARCH_TYPE_SONG, sources=state.sources, songs=songs, page=1, page_size=state.page_size, reloadable=False, created_at=time.time())
             prefix = f"已展开 {len(songs)} 首歌。"
             if errors:
                 prefix += f"部分失败 {len(errors)} 个。"
-            yield event.plain_result(self._format_song_list(keyword, songs, prefix=prefix))
+            yield event.plain_result(self._format_song_list(keyword, songs, page=1, page_size=state.page_size, prefix=prefix))
             return
 
         if text.startswith("r") or text.startswith("换源"):
@@ -175,14 +217,14 @@ class MusicDLPlugin(Star):
                 new_song = await self.music.switch_source(state.songs[idx - 1])
                 state.songs[idx - 1] = new_song
             except Exception as exc:
-                yield event.plain_result(f"换源失败：{exc}")
+                yield event.plain_result(f"换源失败: {exc}")
                 return
-            yield event.plain_result(self._format_song_list(state.keyword, state.songs, prefix="换源完成。"))
+            yield event.plain_result(self._format_song_list(state.keyword, state.songs, page=state.page, page_size=state.page_size, prefix="换源完成。"))
             return
 
         indices = self._parse_indices(text, len(state.songs))
         if not indices:
-            yield event.plain_result("请选择有效编号，例如：1 或 1 2。")
+            yield event.plain_result("请选择有效编号, 例如: 1 或 1 2.")
             return
 
         selected = [state.songs[i - 1] for i in indices]
@@ -283,52 +325,58 @@ class MusicDLPlugin(Star):
             lines.append(f"文件: {downloaded.filename}")
         return "\n".join(lines)
 
-    def _format_song_list(self, keyword: str, songs: list[Song], prefix: str = "") -> str:
+    def _format_song_list(self, keyword: str, songs: list[Song], page: int = 1, page_size: int | None = None, prefix: str = "") -> str:
+        page_size = page_size or self.music.page_size
+        start, end = self._page_bounds(page, page_size, len(songs))
+        visible = songs[start:end]
         lines = []
         if prefix:
             lines.append(prefix)
-        lines.append(f"找到 {len(songs)} 首歌曲: {keyword}")
-        lines.append(f"1/1 页, 每页 {self.music.page_size} 条")
-        sources = sorted({song.source for song in songs if song.source})
+        lines.append(f"找到 {len(visible)} 首歌: {keyword}")
+        lines.append(f"第 {page}/{self._page_total(len(songs), page_size)} 页, 每页 {page_size} 条, 已加载 {len(songs)} 条")
+        sources = self._page_sources(visible) or self._page_sources(songs)
         if sources:
             lines.append("来源: " + ", ".join(sources))
         rows = []
-        for i, song in enumerate(songs, 1):
+        for offset, song in enumerate(visible, start + 1):
             rows.append([
-                "[ ]",
-                str(i),
+                str(offset),
                 self._truncate_text(song.name or "Unknown", 25),
                 self._truncate_text(song.artist or "未知歌手", 15),
                 self._truncate_text(song.album or "-", 15),
                 self._format_duration(song.duration) or "-",
-                "!无效" if song.is_invalid else self._format_size(song.size),
+                self._format_size(song.size),
                 f"{song.bitrate} kbps" if song.bitrate else "-",
                 song.source or "-",
+                self._song_status(song),
             ])
-        lines.extend(self._format_markdown_table(["[选]", "ID", "歌名", "歌手", "专辑", "时长", "大小", "码率", "来源"], rows))
-        lines.append("\n回复编号下载, 例如: 1. 回复 1 2 可批量下载. 回复 r1 可给第 1 首换源. 回复取消结束.")
+        lines.extend(self._format_markdown_table(["ID", "歌名", "歌手", "专辑", "时长", "大小", "码率", "渠道", "状态"], rows))
+        lines.append("\n回复编号下载, 例如: 1. 回复 1 2 可批量下载. 回复 n/下一页, p/上一页, page 2 可翻页. 回复 r1 可给第 1 首歌换源. 回复取消结束.")
         return "\n".join(lines)
 
-    def _format_collection_list(self, keyword: str, collections: list[Collection]) -> str:
+    def _format_collection_list(self, keyword: str, collections: list[Collection], page: int = 1, page_size: int | None = None) -> str:
+        page_size = page_size or self.music.page_size
+        start, end = self._page_bounds(page, page_size, len(collections))
+        visible = collections[start:end]
         label = collections[0].label if collections else "集合"
         kind = collections[0].kind if collections else SEARCH_TYPE_PLAYLIST
-        lines = [f"找到 {len(collections)} {label}: {keyword}"]
-        lines.append(f"1/1 页, 每页 {self.music.page_size} 条")
-        sources = sorted({collection.source for collection in collections if collection.source})
+        lines = [f"找到 {len(visible)} 个{label}: {keyword}"]
+        lines.append(f"第 {page}/{self._page_total(len(collections), page_size)} 页, 每页 {page_size} 条, 已加载 {len(collections)} 条")
+        sources = self._page_sources(visible) or self._page_sources(collections)
         if sources:
             lines.append("来源: " + ", ".join(sources))
         rows = []
-        for i, collection in enumerate(collections, 1):
+        for offset, collection in enumerate(visible, start + 1):
             rows.append([
-                str(i),
+                str(offset),
                 self._truncate_text(collection.name or collection.id, 40),
                 str(collection.track_count) if collection.track_count else "-",
                 self._truncate_text(collection.creator or "-", 20),
                 collection.source or "-",
             ])
-        headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), "来源"]
+        headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), "渠道"]
         lines.extend(self._format_markdown_table(headers, rows))
-        lines.append(f"\n回复编号展开{label}歌曲, 例如: 1. 回复取消结束.")
+        lines.append(f"\n回复编号展开, 例如: 1. 回复 n/下一页, p/上一页, page 2 可翻页. 回复取消结束.")
         return "\n".join(lines)
 
     def _truncate_text(self, value: object, limit: int) -> str:
@@ -372,16 +420,22 @@ class MusicDLPlugin(Star):
 
     def _help_text(self) -> str:
         return "\n".join([
-            "MusicDL 点歌用法：",
-            "/music 歌名或歌手",
-            "/music -s qq,kuwo 歌名",
-            "/music -t song 歌名",
-            "/music -t playlist 歌单名",
-            "/music -t album 专辑名",
-            "/music -s all -t album 周杰伦",
-            "/music https://y.qq.com/n/ryqq/songDetail/xxxx",
-            "/music_sources 查看来源能力",
-            "搜索后回复编号发送音频消息。",
+            "MusicDL 点歌帮助:",
+            "命令: /music, /点歌, /搜歌, /music_help",
+            "搜索: /music 周杰伦",
+            "指定来源: /music -s qq,kuwo 稻香",
+            "类型: /music -t song|playlist|album 关键词",
+            "分页: /music -p 2 -ps 20 周杰伦",
+            "全源: /music -s all -t album 周杰伦",
+            "链接: /music https://y.qq.com/n/ryqq/songDetail/xxxx",
+            "也可直接发送受支持的音乐链接来点歌。",
+            "默认: 不指定 -s 时使用多渠道并发搜索，结果按来源轮询合并。",
+            "列表: 显示 ID/歌名/歌手/专辑/时长/大小/码率/渠道/状态。",
+            "回复编号下载: 1 或 1 2; 全部: a/all/全部",
+            "翻页: n/下一页, p/上一页, page 2/第 2 页",
+            "换源: r1 或 换源1; 取消: 取消 或 /music_cancel",
+            "来源能力: /music_sources",
+            "发送方式配置: sendMode=record|file|both; forwardSongInfo 控制是否发送歌曲详情。",
         ])
 
     def _strip_command(self, text: str, names: set[str]) -> str:
@@ -394,10 +448,20 @@ class MusicDLPlugin(Star):
             return parts[1].strip() if len(parts) > 1 else ""
         return text
 
-    def _parse_search_options(self, text: str) -> tuple[str, list[str] | None, str]:
+    def _parse_search_options(self, text: str) -> tuple[str, list[str] | None, str, int, int]:
         text = text.strip()
         sources = None
         search_type = SEARCH_TYPE_SONG
+        page = 1
+        page_size = self.music.page_size
+        page_size_match = re.search(r"(?:^|\s)(?:-ps|--page-size|--pagesize|pagesize|size|每页)\s*=?\s*(\d+)", text, re.IGNORECASE)
+        if page_size_match:
+            page_size = self._normalize_int(page_size_match.group(1), self.music.page_size, 1, 100)
+            text = (text[: page_size_match.start()] + " " + text[page_size_match.end() :]).strip()
+        page_match = re.search(r"(?:^|\s)(?:-p|--page|page|页)\s*=?\s*(\d+)", text, re.IGNORECASE)
+        if page_match:
+            page = self._normalize_int(page_match.group(1), 1, 1, 999)
+            text = (text[: page_match.start()] + " " + text[page_match.end() :]).strip()
         source_match = re.search(r"(?:^|\s)-s\s+([a-zA-Z0-9_,，-]+)", text)
         if source_match:
             sources = parse_sources(source_match.group(1).replace("，", ","))
@@ -406,7 +470,7 @@ class MusicDLPlugin(Star):
         if type_match:
             search_type = self._normalize_search_type(type_match.group(1))
             text = (text[: type_match.start()] + " " + text[type_match.end() :]).strip()
-        return text, sources, search_type
+        return text, sources, search_type, page, page_size
 
     def _normalize_search_type(self, value: object) -> str:
         raw = str(value or "").strip().lower()
@@ -434,6 +498,63 @@ class MusicDLPlugin(Star):
     def _extract_first_index(self, text: str) -> int | None:
         match = re.search(r"\d+", text)
         return int(match.group(0)) if match else None
+
+    def _parse_page_command(self, text: str, state: SelectionState) -> int | None:
+        raw = text.strip().lower()
+        if raw in {"n", "next", "下一页", "下页"}:
+            return state.page + 1
+        if raw in {"p", "prev", "previous", "上一页", "上页"}:
+            return state.page - 1
+        match = re.fullmatch(r"(?:page\s*|第\s*)(\d+)\s*页?", raw)
+        return int(match.group(1)) if match else None
+
+    async def _format_state_page(self, state: SelectionState, page: int) -> str:
+        page_size = state.page_size or self.music.page_size
+        loaded = len(state.collections) if state.collections else len(state.songs)
+        if page < 1:
+            page = 1
+        if page > self._page_total(loaded, page_size) and state.reloadable:
+            results = await self.music.search(state.keyword, state.search_type, state.sources, limit=self._loaded_limit(page, page_size))
+            if state.search_type == SEARCH_TYPE_SONG:
+                state.songs = [item for item in results if isinstance(item, Song)]
+                state.collections = []
+            else:
+                state.collections = [item for item in results if isinstance(item, Collection)]
+                state.songs = []
+            loaded = len(state.collections) if state.collections else len(state.songs)
+        if (page - 1) * page_size >= loaded:
+            return "没有更多结果。"
+        state.page = page
+        state.created_at = time.time()
+        if state.collections:
+            return self._format_collection_list(state.keyword, state.collections, page=page, page_size=page_size)
+        return self._format_song_list(state.keyword, state.songs, page=page, page_size=page_size)
+
+    def _loaded_limit(self, page: int, page_size: int) -> int:
+        return max(1, page) * max(1, page_size)
+
+    def _page_bounds(self, page: int, page_size: int, total: int) -> tuple[int, int]:
+        start = max(0, (max(1, page) - 1) * max(1, page_size))
+        end = min(total, start + max(1, page_size))
+        return start, end
+
+    def _page_total(self, total: int, page_size: int) -> int:
+        if total <= 0:
+            return 1
+        return max(1, (total + max(1, page_size) - 1) // max(1, page_size))
+
+    def _page_sources(self, items: list[Song] | list[Collection]) -> list[str]:
+        return sorted({item.source for item in items if getattr(item, "source", "")})
+
+    def _song_status(self, song: Song) -> str:
+        return "无效" if song.is_invalid else "有效"
+
+    def _extract_supported_music_link(self, text: str) -> str:
+        for match in re.finditer(r"https?://[^\s]+", text or ""):
+            link = match.group(0).rstrip(',.!?)]"\'' + '，。！？）】》')
+            if self.music.supports_link(link):
+                return link
+        return ""
 
     def _cleanup_sessions(self):
         now = time.time()
