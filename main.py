@@ -393,41 +393,43 @@ class MusicDLPlugin(Star):
         lines = []
         if prefix:
             lines.extend([prefix, ""])
-        lines.append(f"**找到 {len(visible)} 首歌**：{keyword}")
-        lines.append(f"**分页**：第 `{page}/{total_page}` 页 · 每页 `{page_size}` 条 · 已加载 `{len(songs)}` 条")
+        lines.append(f'## 🎵 搜歌结果：{keyword}')
+        lines.append(f'> 本页 `{len(visible)}` 首 · 已加载 `{len(songs)}` 首 · 第 `{page}/{total_page}` 页 · 每页 `{page_size}` 条')
         display_sources = self._source_display_sources(sources, search_type, visible, songs)
         if display_sources:
-            lines.append("**搜索渠道**：" + ", ".join(f"`{source}`" for source in display_sources))
+            lines.append('> 渠道：' + " ".join(f"`{source}`" for source in display_sources))
         pending_count = sum(1 for item in visible if not getattr(item, "probed", False))
         invalid_count = sum(1 for item in visible if getattr(item, "probed", False) and item.is_invalid)
         valid_count = sum(1 for item in visible if getattr(item, "probed", False) and not item.is_invalid)
-        lines.append(f"**歌曲状态**：✅ 有效 `{valid_count}` 首，❌ 无效 `{invalid_count}` 首，⏳ 待探测 `{pending_count}` 首")
-        rows = []
+        lines.append(f'> 状态：✅ `{valid_count}` · ❌ `{invalid_count}` · ⏳ `{pending_count}`')
+        lines.extend(["", "---", ""])
+        if not visible:
+            lines.append('没有更多结果。')
+        last_offset = start + len(visible)
         for offset, song in enumerate(visible, start + 1):
-            rows.append([
-                str(offset),
-                self._song_status(song),
-                song.source or "-",
-                self._truncate_text(song.name or "Unknown", 25),
-                self._truncate_text(song.artist or "未知歌手", 15),
-                self._truncate_text(song.album or "-", 15),
-                self._format_duration(song.duration) or "-",
-                self._format_size(song.size),
-                f"{song.bitrate} kbps" if song.bitrate else "-",
-            ])
-        lines.append("")
-        lines.extend(self._format_markdown_table(["ID", "歌曲状态", "渠道", "歌名", "歌手", "专辑", "时长", "大小", "码率"], rows))
+            title = self._truncate_text(song.name or "Unknown", 36)
+            artist = self._truncate_text(song.artist or '未知歌手', 24)
+            album = self._truncate_text(song.album or "-", 28)
+            duration = self._format_duration(song.duration) or "-"
+            size = self._format_size(song.size)
+            bitrate = f"{song.bitrate} kbps" if song.bitrate else "-"
+            lines.append(f"- `{offset}` {self._song_status(song)} · `{song.source or '-'}` · **{title}**")
+            lines.append(f'  - 歌手：{artist} · 专辑：{album} · 时长：{duration}')
+            lines.append(f'  - 大小：`{size}` · 码率：`{bitrate}`')
+            if offset != last_offset:
+                lines.append("")
         lines.extend([
             "",
-            "**操作**",
-            "- 回复 `1` 下载第 1 首；回复 `1-3`、`1,3,5` 或 `1 2` 批量下载。",
-            "- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。",
-            "- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。",
-            "- 回复 `r1` / `换源1` 给第 1 首歌换源。",
-            "- 回复 `取消` 或 `/music_cancel` 结束。",
+            "---",
+            "",
+            '**操作**',
+            '- `1` 下载第 1 首；`1-3`、`1,3,5` 或 `1 2` 批量下载。',
+            '- `a` / `all` / `全部` 下载当前已加载全部歌曲。',
+            '- `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。',
+            '- `r1` / `换源1` 给第 1 首歌换源。',
+            '- `取消` 或 `/music_cancel` 结束。',
         ])
         return "\n".join(lines)
-
     def _format_collection_list(self, keyword: str, collections: list[Collection], page: int = 1, page_size: int | None = None, prefix: str = "", sources: list[str] | None = None, search_type: str = SEARCH_TYPE_PLAYLIST) -> str:
         page_size = page_size or self.music.page_size
         start, end = self._page_bounds(page, page_size, len(collections))
@@ -504,47 +506,38 @@ class MusicDLPlugin(Star):
         return '是' if bool(value) else '否'
 
     def _help_text(self) -> str:
-        return '\n'.join([
-            '# MusicDL 点歌帮助',
-            '',
-            '## 常用命令',
-            '',
-            '| 功能 | 命令 |',
-            '| --- | --- |',
-            '| 搜索单曲 | `/music 周杰伦` |',
-            '| 指定来源 | `/music -s qq,kuwo 稻香` |',
-            '| 搜歌单/专辑 | `/music -t playlist 关键词` / `/music -t album 关键词` |',
-            '| 分页 | `/music -p 2 -ps 20 周杰伦` |',
-            '| 全源 | `/music -s all -t album 周杰伦` |',
-            '| 链接点歌 | `/music https://y.qq.com/n/ryqq/songDetail/xxxx` |',
-            '',
-            '也可以直接发送受支持的音乐链接来点歌。',
-            '',
-            '## 默认源与筛选',
-            '',
-            '- **默认源**：`netease`, `qq`, `kugou`, `kuwo`, `migu`, `qianqian`, `soda`。',
-            '- **普通搜索**：先按 `music-lib` 的会员/版权字段过滤明显不可播歌曲，再按 `go-music-dl` 的 `GetDownloadURL + Range bytes=0-1` 探测可播放性，有效结果优先展示。',
-            '- **搜索渠道**：列表顶部显示完整默认或指定渠道；表格中的 `渠道` 是每首歌的实际来源。',
-            '- **无效原因**：若有效结果不足，会把少量无效结果排在后面，并标注受限、网络或下载探测失败。',
-            '',
+        return "\n".join([
+            '# MusicDL 点歌',
+            "",
+            '> 先快速返回搜索结果，后台再补充大小 / 码率 / 可用性。',
+            "",
+            '## 搜索',
+            '- `/music 周杰伦`：搜索单曲。',
+            '- `/music -s qq,kuwo 稻香`：指定渠道搜索。',
+            '- `/music -t playlist 周杰伦`：搜索歌单。',
+            '- `/music -t album 范特西`：搜索专辑。',
+            '- `/music -p 2 -ps 20 周杰伦`：直接打开第 2 页，每页 20 条。',
+            '- `/music https://y.qq.com/n/ryqq/songDetail/xxxx`：链接点歌。',
+            "",
             '## 回复操作',
-            '',
-            '- 回复 `1` 下载第 1 首；回复 `1-3`、`1,3,5` 或 `1 2` 批量下载。',
-            '- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。',
-            '- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。',
-            '- 回复 `r1` / `换源1` 给第 1 首歌换源。',
-            '- 回复 `取消` 或 `/music_cancel` 结束。',
-            '',
-            '## 配置与项目',
-            '',
-            '- **来源能力**：`/music_sources`。',
-            '- **发送方式**：`sendMode=record|file|both`。',
-            '- **歌曲详情**：`forwardSongInfo` 控制是否发送歌曲详情。',
-            '- **go-music-dl**：https://github.com/guohuiyuan/go-music-dl',
-            '- **music-lib**：https://github.com/guohuiyuan/music-lib',
-            '- **体验邀请**：欢迎下载体验 `go-music-dl` 的 Web 页面、桌面端、安卓端功能。',
+            '- `1`：下载第 1 首 / 展开第 1 个歌单或专辑。',
+            '- `1-3`、`1,3,5`、`1 2`：批量下载或展开。',
+            '- `a` / `all` / `全部`：下载已加载的全部歌曲。',
+            '- `n` / `p` / `page 2`：下一页 / 上一页 / 跳页。',
+            '- `r1` / `换源1`：给第 1 首歌换源。',
+            '- `取消`：结束当前选择会话。',
+            "",
+            '## 性能与状态',
+            '- `searchTimeout`：搜索阶段快返回等待时间，默认 6 秒；慢源不再阻塞首屏。',
+            '- `⏳ 待探测`：首屏先返回，后台探针后会补发更新列表。',
+            '- `probeConcurrency`：后台探针并发数。',
+            "",
+            '## 其他',
+            '- `/music_sources`：查看渠道能力。',
+            '- `sendMode=record|file|both`：语音 / 文件 / 两者都发。',
+            '- `forwardSongInfo`：下载后是否发送歌曲详情合并转发。',
+            '- 项目：https://github.com/guohuiyuan/go-music-dl',
         ])
-
     def _strip_command(self, text: str, names: set[str]) -> str:
         text = (text or "").strip()
         if not text:

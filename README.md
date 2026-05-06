@@ -232,6 +232,7 @@ ID, 歌曲状态, 歌名, 歌手, 专辑, 时长, 大小, 码率, 渠道
 | `downloadToLocal`     | bool   | `false`          | 对应 `go-music-dl` 的 `downloadToLocal`。关闭时音频仅作为 AstrBot 消息发送，发送后清理临时文件；开启时保留到 `downloadDir`。                                   |
 | `downloadDir`         | string | `data/downloads` | 对应 `go-music-dl` 的 `downloadDir`。音频下载目录，相对路径按 AstrBot 运行目录解析。                                                                             |
 | `cliPageSize`         | int    | `50`             | 对应 `go-music-dl` 的 `cliPageSize`。搜索默认每页数量，命令中的 `-ps` 可以临时覆盖。                                                                           |
+| `searchTimeout`      | float  | `6.0`            | 搜索阶段快返回等待时间，单位秒。超时未返回的慢渠道不会阻塞首屏结果。                                                                                               |
 | `downloadConcurrency` | int    | `3`              | 对应 `go-music-dl` 的 `downloadConcurrency`。批量选择多首歌曲时的并发下载数，范围 `1-5`。                                                                      |
 | `sendMode`            | string | `record`         | 点歌下载后的发送方式。`record` 发送语音；`file` 发送群文件；`both` 同时发送语音和群文件。                                                                      |
 | `forwardSongInfo`     | bool   | `true`           | 点歌后是否发送歌曲详细信息。优先使用合并转发，不支持时降级为普通文本。                                                                                               |

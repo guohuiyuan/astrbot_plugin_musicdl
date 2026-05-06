@@ -536,6 +536,7 @@ class MusicAggregator:
         self.config = config or {}
         self.download_dir = download_dir
         self.timeout = 30.0
+        self.search_timeout = _safe_float(self.config.get("searchTimeout"), 6.0, 1.0, 30.0)
         self.page_size = _safe_int(self.config.get("cliPageSize")) or 50
         self.max_download_bytes = 0
         self.probe_concurrency = _safe_int(self.config.get("probeConcurrency")) or 5
@@ -573,8 +574,8 @@ class MusicAggregator:
             return [parsed] if parsed else []
         selected = self._selected_sources(sources, SEARCH_TYPE_SONG)
         search_limit = _probe_candidate_limit(result_limit, len(selected)) if probe else result_limit
-        tasks = [self._safe_search(provider, keyword, search_limit) for provider in selected]
-        groups = await asyncio.gather(*tasks)
+        timeout = 0 if probe else self.search_timeout
+        groups, timed_out = await self._collect_provider_groups([(provider.source, self._safe_search(provider, keyword, search_limit)) for provider in selected], timeout)
         search_elapsed = time.perf_counter() - started_at
         candidates = _round_robin_merge(groups, search_limit)
         if probe:
@@ -582,15 +583,40 @@ class MusicAggregator:
             await self.probe_songs(candidates)
             logger.info(f"[MusicDL] search elapsed: provider_search={search_elapsed:.2f}s, probe={time.perf_counter() - probe_started_at:.2f}s, candidates={len(candidates)}, probe_concurrency={self.probe_concurrency}")
         else:
-            logger.info(f"[MusicDL] fast search elapsed: provider_search={search_elapsed:.2f}s, candidates={len(candidates)}, probe=deferred")
+            timeout_text = f", timeout_sources={','.join(timed_out)}" if timed_out else ""
+            logger.info(f"[MusicDL] fast search elapsed: provider_search={search_elapsed:.2f}s, candidates={len(candidates)}, probe=deferred, search_timeout={self.search_timeout:.1f}s{timeout_text}")
         return _valid_first(candidates, result_limit)
 
     async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None, limit: int | None = None) -> list[Collection]:
         result_limit = max(1, limit or self.page_size)
+        started_at = time.perf_counter()
         selected = self._selected_sources(sources, search_type)
-        tasks = [self._safe_search_collections(provider, keyword, search_type, result_limit) for provider in selected]
-        groups = await asyncio.gather(*tasks)
-        return _round_robin_merge(groups, result_limit)
+        groups, timed_out = await self._collect_provider_groups([(provider.source, self._safe_search_collections(provider, keyword, search_type, result_limit)) for provider in selected], self.search_timeout)
+        result = _round_robin_merge(groups, result_limit)
+        timeout_text = f", timeout_sources={','.join(timed_out)}" if timed_out else ""
+        logger.info(f"[MusicDL] fast {search_type} search elapsed: provider_search={time.perf_counter() - started_at:.2f}s, candidates={len(result)}, search_timeout={self.search_timeout:.1f}s{timeout_text}")
+        return result
+
+    async def _collect_provider_groups(self, jobs: list[tuple[str, object]], timeout: float = 0) -> tuple[list[list], list[str]]:
+        if not jobs:
+            return [], []
+        if timeout <= 0:
+            groups = await asyncio.gather(*(job for _, job in jobs))
+            return list(groups), []
+        tasks = [asyncio.create_task(job) for _, job in jobs]
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+            task.add_done_callback(_discard_task_result)
+        groups_by_index: list[list] = [[] for _ in jobs]
+        for index, task in enumerate(tasks):
+            if task in done:
+                try:
+                    groups_by_index[index] = task.result()
+                except asyncio.CancelledError:
+                    groups_by_index[index] = []
+        timed_out = [source for (source, _), task in zip(jobs, tasks) if task in pending]
+        return groups_by_index, timed_out
 
     async def parse_link(self, link: str) -> Song | None:
         provider = self._provider_for_link(link)
@@ -1162,6 +1188,23 @@ MiguProvider.search_album_sync = _migu_search_album_sync
 MiguProvider.search_playlist_sync = _migu_search_playlist_sync
 MiguProvider.get_album_songs_sync = _migu_get_album_songs_sync
 MiguProvider.get_playlist_songs_sync = _migu_get_playlist_songs_sync
+
+def _safe_float(value: object, default: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
+
+def _discard_task_result(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
 
 def _normalize_cookies(value: object) -> dict[str, str]:
     if isinstance(value, dict):

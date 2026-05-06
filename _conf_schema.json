@@ -17,6 +17,12 @@
     "type": "int",
     "default": 50
   },
+  "searchTimeout": {
+    "description": "Search Timeout",
+    "hint": "搜索阶段快返回等待时间，单位秒。默认 6 秒；超时未返回的慢渠道不会阻塞首屏结果。",
+    "type": "float",
+    "default": 6.0
+  },
   "downloadConcurrency": {
     "description": "Download Concurrency",
     "hint": "对应 go-music-dl 的 downloadConcurrency。批量选择多首歌曲时的并发下载数，范围 1-5。",
