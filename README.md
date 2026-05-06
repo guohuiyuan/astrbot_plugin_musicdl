@@ -1,6 +1,6 @@
 # astrbot_plugin_musicdl
 
-面向 AstrBot 的纯 Python 聚合点歌插件。插件内部完成音乐搜索、结果选择、换源、下载和音频消息发送，不需要额外启动 `go-music-dl` 二进制、命令行程序或 Web 服务。
+面向 AstrBot 的纯 Python 聚合点歌插件。插件内部完成音乐搜索、结果选择、换源、下载和音频消息发送。
 
 ## 功能
 
@@ -31,15 +31,15 @@ AstrBot 会在插件加载 / 安装流程中自动安装缺失依赖。`cryptogr
 
 ## 命令
 
-| 命令 | 说明 |
-| --- | --- |
-| `/music` | 显示点歌帮助。 |
-| `/music_help` | 显示点歌帮助。别名：`点歌帮助`、`搜歌帮助`。 |
-| `/music 关键词` | 搜索单曲。不指定来源时使用默认多渠道。 |
-| `/点歌 关键词` | `/music` 的中文别名。 |
-| `/搜歌 关键词` | `/music` 的中文别名。 |
+| 命令               | 说明                                             |
+| ------------------ | ------------------------------------------------ |
+| `/music`         | 显示点歌帮助。                                   |
+| `/music_help`    | 显示点歌帮助。别名：`点歌帮助`、`搜歌帮助`。 |
+| `/music 关键词`  | 搜索单曲。不指定来源时使用默认多渠道。           |
+| `/点歌 关键词`   | `/music` 的中文别名。                          |
+| `/搜歌 关键词`   | `/music` 的中文别名。                          |
 | `/music_sources` | 查看所有来源能力和默认源标记。别名：`点歌源`。 |
-| `/music_cancel` | 取消当前点歌选择会话。别名：`取消点歌`。 |
+| `/music_cancel`  | 取消当前点歌选择会话。别名：`取消点歌`。       |
 
 ## 用法
 
@@ -67,12 +67,12 @@ https://y.qq.com/n/ryqq/songDetail/xxxx
 
 ### 参数
 
-| 参数 | 说明 | 示例 |
-| --- | --- | --- |
-| `-s` | 指定来源。多个来源用逗号分隔。支持 `all` 和 `default`。 | `/music -s qq,kuwo 稻香` |
-| `-t` / `-type` | 搜索类型。可选：`song`、`playlist`、`album`。 | `/music -t album 范特西` |
-| `-p` / `--page` / `page` / `页` | 搜索时直接跳到指定页。 | `/music -p 2 周杰伦` |
-| `-ps` / `--page-size` / `--pagesize` / `pagesize` / `size` / `每页` | 指定每页展示数量，范围 `1-100`。 | `/music -ps 20 周杰伦` |
+| 参数                                                                            | 说明                                                        | 示例                       |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------- | -------------------------- |
+| `-s`                                                                          | 指定来源。多个来源用逗号分隔。支持 `all` 和 `default`。 | `/music -s qq,kuwo 稻香` |
+| `-t` / `-type`                                                              | 搜索类型。可选：`song`、`playlist`、`album`。         | `/music -t album 范特西` |
+| `-p` / `--page` / `page` / `页`                                         | 搜索时直接跳到指定页。                                      | `/music -p 2 周杰伦`     |
+| `-ps` / `--page-size` / `--pagesize` / `pagesize` / `size` / `每页` | 指定每页展示数量，范围 `1-100`。                          | `/music -ps 20 周杰伦`   |
 
 ### 搜索后回复
 
@@ -104,15 +104,18 @@ page 2
 
 ## 结果列表
 
-单曲列表不再显示选择框，直接使用 `ID` 回复下载。列表字段包括：
+单曲列表不再显示选择框，直接使用 `ID` 回复下载。列表顶部会显示完整的搜索渠道，默认单曲搜索会包含 `qianqian`。
+
+单曲表格字段包括：
 
 ```text
-ID, 歌名, 歌手, 专辑, 时长, 大小, 码率, 渠道, 状态
+ID, 歌曲状态, 歌名, 歌手, 专辑, 时长, 大小, 码率, 渠道
 ```
 
+- `搜索渠道` 是完整的默认或指定渠道，例如 `netease`, `qq`, `kugou`, `kuwo`, `migu`, `qianqian`, `soda`。
+- `渠道` 是单首歌曲的实际来源，例如 `netease`、`qq`、`kuwo`。
+- `歌曲状态` 会显式标注 `✅ 有效` 或 `❌ 无效`。无效通常表示探测或下载链接不可用。
 - `大小` 和 `码率` 由探针并发获取；获取不到时显示 `-`。
-- `渠道` 是实际来源，例如 `netease`、`qq`、`kuwo`。
-- `状态` 是 `有效` 或 `无效`。无效通常表示探测或下载链接不可用。
 
 ## 来源选择
 
@@ -142,34 +145,34 @@ netease,qq,kugou,kuwo,migu,qianqian,soda
 
 `/music_sources` 会显示每个来源是否属于默认源，以及是否支持单曲、歌单、专辑。
 
-| 来源 | 单曲 | 歌单 | 专辑 | 默认搜索 |
-| --- | --- | --- | --- | --- |
-| `netease` 网易云音乐 | 是 | 是 | 是 | 是 |
-| `qq` QQ音乐 | 是 | 是 | 是 | 是 |
-| `kugou` 酷狗音乐 | 是 | 是 | 是 | 是 |
-| `kuwo` 酷我音乐 | 是 | 是 | 是 | 是 |
-| `migu` 咪咕音乐 | 是 | 否 | 是 | 是 |
-| `fivesing` 5sing | 是 | 是 | 否 | 否 |
-| `jamendo` Jamendo | 是 | 否 | 是 | 否 |
-| `joox` JOOX | 是 | 是 | 是 | 否 |
-| `qianqian` 千千音乐 | 是 | 否 | 是 | 是 |
-| `soda` 汽水音乐 | 是 | 是 | 是 | 是 |
-| `bilibili` Bilibili | 是 | 是 | 否 | 否 |
+| 来源                   | 单曲 | 歌单 | 专辑 | 默认搜索 |
+| ---------------------- | ---- | ---- | ---- | -------- |
+| `netease` 网易云音乐 | 是   | 是   | 是   | 是       |
+| `qq` QQ音乐          | 是   | 是   | 是   | 是       |
+| `kugou` 酷狗音乐     | 是   | 是   | 是   | 是       |
+| `kuwo` 酷我音乐      | 是   | 是   | 是   | 是       |
+| `migu` 咪咕音乐      | 是   | 否   | 是   | 是       |
+| `fivesing` 5sing     | 是   | 是   | 否   | 否       |
+| `jamendo` Jamendo    | 是   | 否   | 是   | 否       |
+| `joox` JOOX          | 是   | 是   | 是   | 否       |
+| `qianqian` 千千音乐  | 是   | 否   | 是   | 是       |
+| `soda` 汽水音乐      | 是   | 是   | 是   | 是       |
+| `bilibili` Bilibili  | 是   | 是   | 否   | 否       |
 
 ## 配置项
 
 插件配置项尽量使用 `go-music-dl` 已有参数名。
 
-| 配置项 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `downloadToLocal` | bool | `false` | 对应 `go-music-dl` 的 `downloadToLocal`。关闭时音频仅作为 AstrBot 消息发送，发送后清理临时文件；开启时保留到 `downloadDir`。 |
-| `downloadDir` | string | `data/downloads` | 对应 `go-music-dl` 的 `downloadDir`。音频下载目录，相对路径按 AstrBot 运行目录解析。 |
-| `cliPageSize` | int | `50` | 对应 `go-music-dl` 的 `cliPageSize`。搜索默认每页数量，命令中的 `-ps` 可以临时覆盖。 |
-| `downloadConcurrency` | int | `3` | 对应 `go-music-dl` 的 `downloadConcurrency`。批量选择多首歌曲时的并发下载数，范围 `1-5`。 |
-| `sendMode` | string | `record` | 点歌下载后的发送方式。`record` 发送语音；`file` 发送群文件；`both` 同时发送语音和群文件。 |
-| `forwardSongInfo` | bool | `true` | 点歌后是否发送歌曲详细信息。优先使用合并转发，不支持时降级为普通文本。 |
-| `probeConcurrency` | int | `5` | 搜索结果探测大小和码率时的并发数，对齐 `go-music-dl` UI 探针行为。 |
-| `cookies` | object | `{}` | 对应 `go-music-dl` 的 Cookie 管理。键名可用：`netease`,`qq`,`kugou`,`kuwo`,`migu`,`fivesing`,`jamendo`,`joox`,`qianqian`,`soda`,`bilibili`。 |
+| 配置项                  | 类型   | 默认值             | 说明                                                                                                                                                                 |
+| ----------------------- | ------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `downloadToLocal`     | bool   | `false`          | 对应 `go-music-dl` 的 `downloadToLocal`。关闭时音频仅作为 AstrBot 消息发送，发送后清理临时文件；开启时保留到 `downloadDir`。                                   |
+| `downloadDir`         | string | `data/downloads` | 对应 `go-music-dl` 的 `downloadDir`。音频下载目录，相对路径按 AstrBot 运行目录解析。                                                                             |
+| `cliPageSize`         | int    | `50`             | 对应 `go-music-dl` 的 `cliPageSize`。搜索默认每页数量，命令中的 `-ps` 可以临时覆盖。                                                                           |
+| `downloadConcurrency` | int    | `3`              | 对应 `go-music-dl` 的 `downloadConcurrency`。批量选择多首歌曲时的并发下载数，范围 `1-5`。                                                                      |
+| `sendMode`            | string | `record`         | 点歌下载后的发送方式。`record` 发送语音；`file` 发送群文件；`both` 同时发送语音和群文件。                                                                      |
+| `forwardSongInfo`     | bool   | `true`           | 点歌后是否发送歌曲详细信息。优先使用合并转发，不支持时降级为普通文本。                                                                                               |
+| `probeConcurrency`    | int    | `5`              | 搜索结果探测大小和码率时的并发数，对齐 `go-music-dl` UI 探针行为。                                                                                                 |
+| `cookies`             | object | `{}`             | 对应 `go-music-dl` 的 Cookie 管理。键名可用：`netease`,`qq`,`kugou`,`kuwo`,`migu`,`fivesing`,`jamendo`,`joox`,`qianqian`,`soda`,`bilibili`。 |
 
 `webPageSize`、`embedDownload`、`vgChangeCover`、`vgChangeAudio`、`vgChangeLyric`、`vgExportVideo` 属于 `go-music-dl` Web 页面或视频生成流程，AstrBot 点歌插件当前不会使用，因此不放入插件配置。
 
@@ -191,8 +194,17 @@ Cookie 示例：
 - 直接发链接点歌会拦截受支持的音乐链接消息并尝试下载，普通网页链接不会被处理。
 - 本插件只负责在 AstrBot 内完成点歌和音频发送，不提供音乐版权内容。
 
+## 体验 go-music-dl
+
+本插件专注于 AstrBot 内的点歌和音频发送。如果你希望体验更完整的音乐搜索、下载、歌单 / 专辑、多端 UI 能力，欢迎下载体验 `go-music-dl`。
+
+- **go-music-dl 项目地址**：[https://github.com/guohuiyuan/go-music-dl](https://github.com/guohuiyuan/go-music-dl)
+- **music-lib 项目地址**：[https://github.com/guohuiyuan/music-lib](https://github.com/guohuiyuan/music-lib)
+- **体验形态**：`go-music-dl` 提供 Web 页面、桌面端、安卓端等使用方式，适合直接体验完整功能。
+
 ## 致谢
 
-本插件的多平台设计、来源命名、默认源规则以及部分接口行为参考并致敬 `go-music-dl` 及其 `music-lib` 实现。
+感谢以下优秀的开源项目：
 
-本插件是面向 AstrBot 的纯 Python 实现：不调用 `go-music-dl` 二进制、Web 服务或 CLI，只在实现思路和接口适配上参考其优秀工作。
+- **参考项目**：[go-music-dl](https://github.com/guohuiyuan/go-music-dl) - 多端音乐搜索、下载与体验工具，支持 Web 页面、桌面端、安卓端等形态。
+- **核心库参考**：[music-lib](https://github.com/guohuiyuan/music-lib) - 音乐平台搜索、解析和下载能力实现。
