@@ -119,17 +119,17 @@ ID, 歌曲状态, 歌名, 歌手, 专辑, 时长, 大小, 码率, 渠道
 
 ## 来源选择
 
-默认搜索源参考 `go-music-dl` 的默认行为。
+默认搜索源参考 `go-music-dl` 的默认行为。可以通过 `-s` 临时指定来源，多个来源用逗号分隔，也可以使用 `all` 或 `default`。
 
-单曲默认源：
+### 按搜索类型默认渠道
 
-```text
-netease,qq,kugou,kuwo,migu,qianqian,soda
-```
+| 搜索类型 | 已调通默认渠道 |
+| --- | --- |
+| `song` 单曲 | `netease` 网易云音乐、`qq` QQ音乐、`kugou` 酷狗音乐、`kuwo` 酷我音乐、`migu` 咪咕音乐、`qianqian` 千千音乐、`soda` 汽水音乐 |
+| `album` 专辑 | `netease` 网易云音乐、`qq` QQ音乐、`kugou` 酷狗音乐、`kuwo` 酷我音乐、`migu` 咪咕音乐、`jamendo` Jamendo、`joox` JOOX、`qianqian` 千千音乐、`soda` 汽水音乐 |
+| `playlist` 歌单 | `netease` 网易云音乐、`qq` QQ音乐、`kugou` 酷狗音乐、`kuwo` 酷我音乐、`migu` 咪咕音乐、`fivesing` 5sing、`joox` JOOX、`qianqian` 千千音乐、`soda` 汽水音乐、`bilibili` Bilibili |
 
-歌单搜索会默认选择当前支持歌单搜索的来源。专辑搜索会默认选择当前支持专辑搜索的来源。
-
-可以通过 `-s` 临时指定来源：
+示例：
 
 ```text
 /music -s bilibili -t playlist 起风了
@@ -143,21 +143,85 @@ netease,qq,kugou,kuwo,migu,qianqian,soda
 
 ## 来源能力
 
-`/music_sources` 会显示每个来源是否属于默认源，以及是否支持单曲、歌单、专辑。
+`/music_sources` 会显示每个来源是否属于默认单曲搜索源，以及是否支持单曲、歌单、专辑。
 
-| 来源                   | 单曲 | 歌单 | 专辑 | 默认搜索 |
-| ---------------------- | ---- | ---- | ---- | -------- |
-| `netease` 网易云音乐 | 是   | 是   | 是   | 是       |
-| `qq` QQ音乐          | 是   | 是   | 是   | 是       |
-| `kugou` 酷狗音乐     | 是   | 是   | 是   | 是       |
-| `kuwo` 酷我音乐      | 是   | 是   | 是   | 是       |
-| `migu` 咪咕音乐      | 是   | 否   | 是   | 是       |
-| `fivesing` 5sing     | 是   | 是   | 否   | 否       |
-| `jamendo` Jamendo    | 是   | 否   | 是   | 否       |
-| `joox` JOOX          | 是   | 是   | 是   | 否       |
-| `qianqian` 千千音乐  | 是   | 否   | 是   | 是       |
-| `soda` 汽水音乐      | 是   | 是   | 是   | 是       |
-| `bilibili` Bilibili  | 是   | 是   | 否   | 否       |
+| 来源 | 单曲 `song` | 歌单 `playlist` | 专辑 `album` | 默认单曲搜索 |
+| --- | --- | --- | --- | --- |
+| `netease` 网易云音乐 | 是 | 是 | 是 | 是 |
+| `qq` QQ音乐 | 是 | 是 | 是 | 是 |
+| `kugou` 酷狗音乐 | 是 | 是 | 是 | 是 |
+| `kuwo` 酷我音乐 | 是 | 是 | 是 | 是 |
+| `migu` 咪咕音乐 | 是 | 是 | 是 | 是 |
+| `fivesing` 5sing | 是 | 是 | 否 | 否 |
+| `jamendo` Jamendo | 是 | 否 | 是 | 否 |
+| `joox` JOOX | 是 | 是 | 是 | 否 |
+| `qianqian` 千千音乐 | 是 | 是 | 是 | 是 |
+| `soda` 汽水音乐 | 是 | 是 | 是 | 是 |
+| `bilibili` Bilibili | 是 | 是 | 否 | 否 |
+
+## 实际运行结果
+
+> 以下为 2026-05-06 实际运行搜索结果，结果受平台接口、网络、Cookie 和关键词影响。`EMPTY` 表示该关键词本次返回空结果，不代表渠道能力永久不可用。
+
+### `song` 歌曲搜索：`晴天`
+
+| 渠道 | 状态 | 耗时 | 数量 | 样例 |
+| --- | --- | ---: | ---: | --- |
+| `netease` | OK | 5.86s | 4 | 晴天 (原唱 周杰伦) / RyaVocal / `2668397359` |
+| `qq` | OK | 5.29s | 2 | 晴天 (深情版) / Lucky小爱 / `0042rlGx2WHBrG` |
+| `kugou` | OK | 5.36s | 2 | 晴天 (温柔女声版) / 吉拉朵 / `91A662A6DD6F74A96B0A7609EAEFDF3A` |
+| `kuwo` | OK | 16.50s | 2 | 晴天 / 周杰伦 / `228908` |
+| `migu` | OK | 9.99s | 1 | 晴天娃娃 / 江语晨 / `600919000007741344\|E\|SQ` |
+| `fivesing` | OK | 5.37s | 5 | 晴天 / Vk / `15622111\|fc` |
+| `jamendo` | OK | 5.67s | 1 | Ching Tin Yu - 晴天雨 / Dylan Tinlun Chan / `751965` |
+| `joox` | OK | 7.62s | 5 | 晴天 / 周杰倫 / `bLnv0PqDX_qAlIqapc+Okw==` |
+| `qianqian` | OK | 5.66s | 2 | 等晴天 / 周深 / `T10065400429` |
+| `soda` | OK | 6.48s | 5 | 晴天 / 搁浅 / `7381316977862445096` |
+| `bilibili` | OK | 26.76s | 4 | 晴天-周杰伦【Hi-Res无损音质】 / 希声音乐 / `BV1NHxrz6Ek4\|32930269376` |
+
+- **可用渠道**：`netease`, `qq`, `kugou`, `kuwo`, `migu`, `fivesing`, `jamendo`, `joox`, `qianqian`, `soda`, `bilibili`
+- **空结果**：无
+- **失败**：无
+
+### `playlist` 歌单搜索：`周杰伦`
+
+| 渠道 | 状态 | 耗时 | 数量 | 样例 |
+| --- | --- | ---: | ---: | --- |
+| `netease` | OK | 5.83s | 5 | 周杰伦-Jay 『网易云精选』 / Buradarrr / tracks=137 / `6792103822` |
+| `qq` | OK | 5.45s | 5 | 周杰伦歌曲大全！一张歌单全听完 / 歌单狂魔 / tracks=223 / `3805603854` |
+| `kugou` | OK | 5.66s | 5 | 周杰伦必听热歌｜聆听周式金曲，聆听青春记忆 / 酷乐推荐 / tracks=150 / `6409645` |
+| `kuwo` | OK | 16.37s | 5 | 终于等到周杰伦，说好不哭你今天哭了吗？ / 第一天 / tracks=177 / `2867496601` |
+| `migu` | OK | 9.81s | 5 | 周杰伦精选100首：青春百听不厌 / - / tracks=100 / `233754996` |
+| `fivesing` | OK | 5.37s | 5 | 周杰伦 / ID: 54366916 / tracks=40 / `56ace0c4482b861d20f135e9` |
+| `jamendo` | EMPTY | 5.67s | 0 | - |
+| `joox` | OK | 7.80s | 5 | JOOX & 杰威爾音乐全典藏 / - / tracks=- / `qa5UUXpdaakAUZL3IUURLA==` |
+| `qianqian` | EMPTY | 0.07s | 0 | - |
+| `soda` | OK | 6.23s | 5 | 周杰伦全部歌曲 / 钢琴小马甲 / tracks=10 / `7532035153447649318` |
+| `bilibili` | OK | 33.25s | 4 | 【周杰伦】周杰伦经典合集 / 清影音乐库 / tracks=70 / `bvid:BV1WfRCBPECr` |
+
+- **可用渠道**：`netease`, `qq`, `kugou`, `kuwo`, `migu`, `fivesing`, `joox`, `soda`, `bilibili`
+- **空结果**：`jamendo`, `qianqian`
+- **失败**：无
+
+### `album` 专辑搜索：`范特西`
+
+| 渠道 | 状态 | 耗时 | 数量 | 样例 |
+| --- | --- | ---: | ---: | --- |
+| `netease` | OK | 5.83s | 5 | 范特西 - 流行Pop x 周杰伦 Type Beat / YKFireVibes / tracks=1 / `272566217` |
+| `qq` | OK | 5.22s | 5 | 范特西 / 周杰伦 / tracks=- / `000I5jJB3blWeN` |
+| `kugou` | OK | 9.01s | 5 | 范特西 / 周杰伦 / tracks=10 / `958706` |
+| `kuwo` | OK | 16.50s | 5 | 范特西 / Jay&nbsp;Chou / tracks=10 / `1287` |
+| `migu` | OK | 9.66s | 3 | 范特西 / 周杰伦 / tracks=- / `7948` |
+| `fivesing` | EMPTY | 0.07s | 0 | - |
+| `jamendo` | EMPTY | 5.67s | 0 | - |
+| `joox` | OK | 8.02s | 3 | 范特西 / 周杰倫 / tracks=- / `C1CeCbh6qThtRTBU3oa5Ig==` |
+| `qianqian` | OK | 10.47s | 5 | 范特西2 / 河北YE / tracks=2 / `P10003660107` |
+| `soda` | OK | 11.29s | 5 | 范特西 / Jinhua Jue / tracks=10 / `7518690014478993409` |
+| `bilibili` | EMPTY | 0.07s | 0 | - |
+
+- **可用渠道**：`netease`, `qq`, `kugou`, `kuwo`, `migu`, `joox`, `qianqian`, `soda`
+- **空结果**：`fivesing`, `jamendo`, `bilibili`
+- **失败**：无
 
 ## 配置项
 

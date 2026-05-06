@@ -34,7 +34,7 @@ from .extra_providers import (
 UA_PC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
 MIGU_MAGIC_USER_ID = "15548614588710179085069"
-UNAVAILABLE_PLAYLIST_SOURCE_NAMES = {"migu", "jamendo"}
+UNAVAILABLE_PLAYLIST_SOURCE_NAMES = {"jamendo"}
 
 
 def _decode_response_body(data: bytes, headers: dict[str, str]) -> bytes:

@@ -35,7 +35,7 @@ SEARCH_TYPE_ALIASES = {
     "astrbot_plugin_musicdl",
     "guohuiyuan",
     "纯 Python 聚合音乐搜索/下载/点歌插件。",
-    "0.2.0",
+    "0.3.0",
 )
 class MusicDLPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
