@@ -7,7 +7,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import File, Node, Nodes, Plain, Record
+from astrbot.api.message_components import File, Image, Node, Nodes, Plain, Record
 from astrbot.api.star import Context, Star, register
 
 from .musicdl.models import Collection, SEARCH_TYPE_ALBUM, SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_SONG, SelectionState, Song
@@ -265,28 +265,28 @@ class MusicDLPlugin(Star):
             await self._send_song_info_forward(event, results)
 
     async def _send_downloaded_song(self, event: AstrMessageEvent, song: Song, downloaded) -> bool:
-        caption = self._song_send_caption(song)
         sent = False
         if self.send_mode in {"record", "both"}:
             try:
-                await event.send(MessageChain([Plain(caption), Record.fromFileSystem(str(downloaded.path))]))
+                await event.send(MessageChain([Record.fromFileSystem(str(downloaded.path))]))
                 sent = True
             except Exception as exc:
                 logger.warning(f"[MusicDL] 语音发送失败: {song.title}: {exc}")
         if self.send_mode in {"file", "both"} or (self.send_mode == "record" and not sent):
-            sent = await self._send_downloaded_file(event, song, downloaded, caption) or sent
+            sent = await self._send_downloaded_file(event, song, downloaded) or sent
         return sent
 
-    async def _send_downloaded_file(self, event: AstrMessageEvent, song: Song, downloaded, caption: str) -> bool:
+    async def _send_downloaded_file(self, event: AstrMessageEvent, song: Song, downloaded) -> bool:
         file_url = str(getattr(downloaded, "url", "") or getattr(song, "url", "") or "").strip()
-        if file_url.startswith(("http://", "https://")):
+        use_file_url = str(getattr(song, "source", "") or "").strip().lower() != "soda"
+        if use_file_url and file_url.startswith(("http://", "https://")):
             try:
-                await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, url=file_url)]))
+                await event.send(MessageChain([File(name=downloaded.filename, url=file_url)]))
                 return True
             except Exception as exc:
                 logger.warning(f"[MusicDL] 文件 URL 发送失败，尝试本地文件: {song.title}: {exc}")
         try:
-            await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, file=str(downloaded.path))]))
+            await event.send(MessageChain([File(name=downloaded.filename, file=str(downloaded.path))]))
             return True
         except Exception as exc:
             logger.warning(f"[MusicDL] 文件发送失败: {song.title}: {exc}")
@@ -295,15 +295,22 @@ class MusicDLPlugin(Star):
     async def _send_song_info_forward(self, event: AstrMessageEvent, results: list[dict]) -> None:
         if not results:
             return
-        details = [self._format_song_detail(item["song"], item.get("downloaded"), item.get("error")) for item in results]
         get_self_id = getattr(event, "get_self_id", None)
         self_id = str(get_self_id() if callable(get_self_id) else "0")
         try:
-            nodes = [Node(uin=self_id, name="MusicDL", content=[Plain(detail)]) for detail in details]
+            nodes = [Node(uin=self_id, name="MusicDL", content=self._song_detail_components(item["song"], item.get("downloaded"), item.get("error"))) for item in results]
             await event.send(MessageChain([Nodes(nodes)]))
         except Exception as exc:
             logger.warning(f"[MusicDL] 合并转发歌曲信息失败: {exc}")
+            details = [self._format_song_detail(item["song"], item.get("downloaded"), item.get("error"), include_cover_link=True) for item in results]
             await event.send(MessageChain([Plain("歌曲信息:\n\n" + "\n\n".join(details))]))
+
+    def _song_detail_components(self, song: Song, downloaded=None, error: Exception | None = None) -> list:
+        content = [Plain(self._format_song_detail(song, downloaded, error))]
+        cover = str(getattr(song, "cover", "") or "").strip()
+        if cover.startswith(("http://", "https://")):
+            content.append(Image.fromURL(cover))
+        return content
 
     def _song_send_caption(self, song: Song) -> str:
         return "\n".join([
@@ -312,7 +319,7 @@ class MusicDLPlugin(Star):
             f"大小: {self._format_size(song.size)}    码率: {song.bitrate} kbps" if song.bitrate else f"大小: {self._format_size(song.size)}",
         ])
 
-    def _format_song_detail(self, song: Song, downloaded=None, error: Exception | None = None) -> str:
+    def _format_song_detail(self, song: Song, downloaded=None, error: Exception | None = None, include_cover_link: bool = False) -> str:
         ext = song.ext or (downloaded.path.suffix.lower().lstrip(".") if downloaded else "")
         status = "下载成功" if downloaded else (f"下载失败: {error}" if error else "-")
         source_desc = source_description(song.source) if song.source else "-"
@@ -330,7 +337,7 @@ class MusicDLPlugin(Star):
         ]
         if song.link:
             lines.append(f"链接: {song.link}")
-        if song.cover:
+        if include_cover_link and song.cover:
             lines.append(f"封面: {song.cover}")
         if downloaded:
             lines.append(f"文件: {downloaded.filename}")
