@@ -555,26 +555,34 @@ class MusicAggregator:
             "bilibili": BilibiliProvider(str(cookies.get("bilibili", "")), self.timeout),
         }
 
-    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None, limit: int | None = None) -> list[Song] | list[Collection]:
+    async def search(self, keyword: str, search_type: str = SEARCH_TYPE_SONG, sources: list[str] | None = None, limit: int | None = None, probe: bool = True) -> list[Song] | list[Collection]:
         if search_type == SEARCH_TYPE_SONG:
-            return await self.search_songs(keyword, sources, limit)
+            return await self.search_songs(keyword, sources, limit, probe=probe)
         if search_type in {SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_ALBUM}:
             return await self.search_collections(keyword, search_type, sources, limit)
         raise ProviderError(f"unsupported search type: {search_type}")
 
-    async def search_songs(self, keyword: str, sources: list[str] | None = None, limit: int | None = None) -> list[Song]:
+    async def search_songs(self, keyword: str, sources: list[str] | None = None, limit: int | None = None, probe: bool = True) -> list[Song]:
         result_limit = max(1, limit or self.page_size)
+        started_at = time.perf_counter()
         if keyword.startswith("http://") or keyword.startswith("https://"):
             parsed = await self.parse_link(keyword)
-            if parsed:
+            if parsed and probe:
                 await self.probe_song(parsed)
+            logger.info(f"[MusicDL] link parse elapsed {time.perf_counter() - started_at:.2f}s probe={probe}")
             return [parsed] if parsed else []
         selected = self._selected_sources(sources, SEARCH_TYPE_SONG)
-        candidate_limit = _probe_candidate_limit(result_limit, len(selected))
-        tasks = [self._safe_search(provider, keyword, candidate_limit) for provider in selected]
+        search_limit = _probe_candidate_limit(result_limit, len(selected)) if probe else result_limit
+        tasks = [self._safe_search(provider, keyword, search_limit) for provider in selected]
         groups = await asyncio.gather(*tasks)
-        candidates = _round_robin_merge(groups, candidate_limit)
-        await self.probe_songs(candidates)
+        search_elapsed = time.perf_counter() - started_at
+        candidates = _round_robin_merge(groups, search_limit)
+        if probe:
+            probe_started_at = time.perf_counter()
+            await self.probe_songs(candidates)
+            logger.info(f"[MusicDL] search elapsed: provider_search={search_elapsed:.2f}s, probe={time.perf_counter() - probe_started_at:.2f}s, candidates={len(candidates)}, probe_concurrency={self.probe_concurrency}")
+        else:
+            logger.info(f"[MusicDL] fast search elapsed: provider_search={search_elapsed:.2f}s, candidates={len(candidates)}, probe=deferred")
         return _valid_first(candidates, result_limit)
 
     async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None, limit: int | None = None) -> list[Collection]:
@@ -590,7 +598,7 @@ class MusicAggregator:
             return None
         return await provider.parse(link)
 
-    async def get_collection_songs(self, collection: Collection) -> list[Song]:
+    async def get_collection_songs(self, collection: Collection, probe: bool = True) -> list[Song]:
         provider = self.providers.get(collection.source)
         if not provider:
             raise ProviderError(f"unsupported source: {collection.source}")
@@ -599,7 +607,8 @@ class MusicAggregator:
             raise ProviderError(f"{collection.source} does not support expanding {collection.label}")
         songs = await method(collection)
         result = songs[: self.page_size]
-        await self.probe_songs(result)
+        if probe:
+            await self.probe_songs(result)
         return result
 
     async def switch_source(self, song: Song) -> Song:
@@ -1269,12 +1278,14 @@ def _mark_song_valid(song: Song) -> None:
     song.is_invalid = False
     song.invalid_reason = ""
     song.invalid_type = ""
+    song.probed = True
 
 
 def _mark_song_invalid(song: Song, reason: object, invalid_type: str = "download_url") -> None:
     song.is_invalid = True
     song.invalid_reason = re.sub(r"\s+", " ", str(reason or "")).strip()[:160]
     song.invalid_type = invalid_type or "download_url"
+    song.probed = True
 
 
 def _invalid_type_from_status(status: object) -> str:

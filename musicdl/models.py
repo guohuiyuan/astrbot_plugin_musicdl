@@ -28,6 +28,7 @@ class Song:
     is_invalid: bool = False
     invalid_reason: str = ""
     invalid_type: str = ""
+    probed: bool = False
 
     @property
     def title(self) -> str:
