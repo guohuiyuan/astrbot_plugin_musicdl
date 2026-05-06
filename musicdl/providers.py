@@ -617,6 +617,8 @@ class MusicAggregator:
         if not provider:
             raise ProviderError("unsupported source: " + str(song.source))
         source = await provider.get_download_url(song)
+        if source.url:
+            song.url = source.url
         self.download_dir.mkdir(parents=True, exist_ok=True)
         path, data = await asyncio.to_thread(self._download_sync, song, source)
         await asyncio.to_thread(path.write_bytes, data)
@@ -626,7 +628,7 @@ class MusicAggregator:
             song.bitrate = int((song.size * 8) / int(song.duration) / 1000)
         if not song.ext:
             song.ext = path.suffix.lower().lstrip(".")
-        return DownloadedFile(path=path, filename=path.name, song=song)
+        return DownloadedFile(path=path, filename=path.name, song=song, url=source.url)
 
     async def probe_songs(self, songs: list[Song], concurrency: int | None = None) -> list[Song]:
         if not songs:

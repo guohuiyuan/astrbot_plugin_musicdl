@@ -25,9 +25,19 @@
   },
   "sendMode": {
     "description": "Send Mode",
-    "hint": "点歌下载后的发送方式: record 发送语音; file 发送群文件; both 同时发送语音和群文件.",
+    "hint": "点歌下载后的发送方式：record 发送语音；file 发送群文件；both 同时发送语音和群文件。NapCat 与 AstrBot 不在同一文件系统时，file 会优先使用下载 URL 发送。",
     "type": "string",
-    "default": "record"
+    "default": "record",
+    "options": [
+      "record",
+      "file",
+      "both"
+    ],
+    "labels": [
+      "语音 record",
+      "群文件 file",
+      "语音 + 群文件 both"
+    ]
   },
   "forwardSongInfo": {
     "description": "Forward Song Info",

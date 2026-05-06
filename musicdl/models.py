@@ -72,3 +72,4 @@ class DownloadedFile:
     path: Path
     filename: str
     song: Song
+    url: str = ""

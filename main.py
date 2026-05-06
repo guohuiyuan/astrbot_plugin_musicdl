@@ -149,7 +149,7 @@ class MusicDLPlugin(Star):
         self.sessions.pop(event.unified_msg_origin, None)
         yield event.plain_result("已取消当前点歌选择。")
 
-    @filter.regex(r"^\s*(?:\d+(?:[\s,，]+\d+)*|a|all|全部|取消|q|r\s*\d+|换源\s*\d+|n|next|下一页|下页|p|prev|previous|上一页|上页|page\s*\d+|第\s*\d+\s*页)\s*$")
+    @filter.regex(r"^\s*(?:(?:\d+(?:\s*[-~～—–至到]\s*\d+)?)(?:[\s,，;；]+(?:\d+(?:\s*[-~～—–至到]\s*\d+)?))*|a|all|全部|取消|q|r\s*\d+|换源\s*\d+|n|next|下一页|下页|p|prev|previous|上一页|上页|page\s*\d+|第\s*\d+\s*页)\s*$")
     async def music_selection(self, event: AstrMessageEvent):
         self._cleanup_sessions()
         state = self.sessions.get(event.unified_msg_origin)
@@ -180,7 +180,7 @@ class MusicDLPlugin(Star):
         if state.collections:
             indices = self._parse_indices(text, len(state.collections))
             if not indices:
-                yield event.plain_result("请选择有效编号, 例如: 1 或 1 2.")
+                yield event.plain_result("请选择有效编号，例如：1、1-3、1,3,5 或 1 2。")
                 return
             selected = [state.collections[i - 1] for i in indices]
             await event.send(MessageChain([Plain(f"正在展开 {len(selected)} 个{selected[0].label}...")]))
@@ -224,7 +224,7 @@ class MusicDLPlugin(Star):
 
         indices = self._parse_indices(text, len(state.songs))
         if not indices:
-            yield event.plain_result("请选择有效编号, 例如: 1 或 1 2.")
+            yield event.plain_result("请选择有效编号，例如：1、1-3、1,3,5 或 1 2。")
             return
 
         selected = [state.songs[i - 1] for i in indices]
@@ -274,12 +274,23 @@ class MusicDLPlugin(Star):
             except Exception as exc:
                 logger.warning(f"[MusicDL] 语音发送失败: {song.title}: {exc}")
         if self.send_mode in {"file", "both"} or (self.send_mode == "record" and not sent):
-            try:
-                await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, file=str(downloaded.path))]))
-                sent = True
-            except Exception as exc:
-                logger.warning(f"[MusicDL] 文件发送失败: {song.title}: {exc}")
+            sent = await self._send_downloaded_file(event, song, downloaded, caption) or sent
         return sent
+
+    async def _send_downloaded_file(self, event: AstrMessageEvent, song: Song, downloaded, caption: str) -> bool:
+        file_url = str(getattr(downloaded, "url", "") or getattr(song, "url", "") or "").strip()
+        if file_url.startswith(("http://", "https://")):
+            try:
+                await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, url=file_url)]))
+                return True
+            except Exception as exc:
+                logger.warning(f"[MusicDL] 文件 URL 发送失败，尝试本地文件: {song.title}: {exc}")
+        try:
+            await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, file=str(downloaded.path))]))
+            return True
+        except Exception as exc:
+            logger.warning(f"[MusicDL] 文件发送失败: {song.title}: {exc}")
+            return False
 
     async def _send_song_info_forward(self, event: AstrMessageEvent, results: list[dict]) -> None:
         if not results:
@@ -358,7 +369,7 @@ class MusicDLPlugin(Star):
         lines.extend([
             "",
             "**操作**",
-            "- 回复 `1` 下载第 1 首；回复 `1 2` 批量下载。",
+            "- 回复 `1` 下载第 1 首；回复 `1-3`、`1,3,5` 或 `1 2` 批量下载。",
             "- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。",
             "- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。",
             "- 回复 `r1` / `换源1` 给第 1 首歌换源。",
@@ -393,7 +404,7 @@ class MusicDLPlugin(Star):
         lines.extend([
             "",
             "**操作**",
-            "- 回复 `1` 展开第 1 个结果。",
+            "- 回复 `1` 展开第 1 个结果；回复 `1-3`、`1,3,5` 批量展开。",
             "- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。",
             "- 回复 `取消` 或 `/music_cancel` 结束。",
         ])
@@ -464,7 +475,7 @@ class MusicDLPlugin(Star):
             '',
             '## 回复操作',
             '',
-            '- 回复 `1` 下载第 1 首；回复 `1 2` 批量下载。',
+            '- 回复 `1` 下载第 1 首；回复 `1-3`、`1,3,5` 或 `1 2` 批量下载。',
             '- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。',
             '- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。',
             '- 回复 `r1` / `换源1` 给第 1 首歌换源。',
@@ -526,15 +537,21 @@ class MusicDLPlugin(Star):
         return "歌曲"
 
     def _parse_indices(self, text: str, total: int) -> list[int]:
-        if text in {"a", "all", "全部"}:
+        raw = text.strip().lower()
+        if raw in {"a", "all", "全部"}:
             return list(range(1, total + 1))
+        normalized = re.sub(r"(\d+)\s*[-~～—–至到]\s*(\d+)", r"\1-\2", raw)
         result = []
-        for part in re.split(r"[\s,，]+", text.strip()):
-            if not part.isdigit():
+        for part in re.split(r"[\s,，;；]+", normalized):
+            match = re.fullmatch(r"(\d+)(?:-(\d+))?", part.strip())
+            if not match:
                 continue
-            idx = int(part)
-            if 1 <= idx <= total and idx not in result:
-                result.append(idx)
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            step = 1 if start <= end else -1
+            for idx in range(start, end + step, step):
+                if 1 <= idx <= total and idx not in result:
+                    result.append(idx)
         return result
 
     def _extract_first_index(self, text: str) -> int | None:
