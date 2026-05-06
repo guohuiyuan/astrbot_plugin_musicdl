@@ -15,13 +15,7 @@
     "description": "CLI Page Size",
     "hint": "对应 go-music-dl 的 cliPageSize。点歌搜索结果最多展示的歌曲数量。",
     "type": "int",
-    "default": 50
-  },
-  "searchTimeout": {
-    "description": "Search Timeout",
-    "hint": "搜索阶段快返回等待时间，单位秒。默认 6 秒；超时未返回的慢渠道不会阻塞首屏结果。",
-    "type": "float",
-    "default": 6.0
+    "default": 30
   },
   "downloadConcurrency": {
     "description": "Download Concurrency",
