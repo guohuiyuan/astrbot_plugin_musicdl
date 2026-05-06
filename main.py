@@ -345,16 +345,16 @@ class MusicDLPlugin(Star):
             rows.append([
                 str(offset),
                 self._song_status(song),
+                song.source or "-",
                 self._truncate_text(song.name or "Unknown", 25),
                 self._truncate_text(song.artist or "未知歌手", 15),
                 self._truncate_text(song.album or "-", 15),
                 self._format_duration(song.duration) or "-",
                 self._format_size(song.size),
                 f"{song.bitrate} kbps" if song.bitrate else "-",
-                song.source or "-",
             ])
         lines.append("")
-        lines.extend(self._format_markdown_table(["ID", "歌曲状态", "歌名", "歌手", "专辑", "时长", "大小", "码率", "渠道"], rows))
+        lines.extend(self._format_markdown_table(["ID", "歌曲状态", "渠道", "歌名", "歌手", "专辑", "时长", "大小", "码率"], rows))
         lines.extend([
             "",
             "**操作**",
@@ -440,27 +440,44 @@ class MusicDLPlugin(Star):
 
     def _help_text(self) -> str:
         return '\n'.join([
-            'MusicDL 点歌帮助:',
-            '命令: /music, /点歌, /搜歌, /music_help',
-            '搜索: /music 周杰伦',
-            '指定来源: /music -s qq,kuwo 稻香',
-            '类型: /music -t song|playlist|album 关键词',
-            '分页: /music -p 2 -ps 20 周杰伦',
-            '全源: /music -s all -t album 周杰伦',
-            '链接: /music https://y.qq.com/n/ryqq/songDetail/xxxx',
-            '也可直接发送受支持的音乐链接来点歌。',
-            '默认源: netease, qq, kugou, kuwo, migu, qianqian, soda',
-            '默认: 不指定 -s 时使用多渠道并发搜索，结果按来源轮询合并。',
-            '搜索渠道: 列表顶部显示完整默认或指定渠道；表格渠道列是单曲实际来源。',
-            '列表: 显示 ID/歌曲状态/歌名/歌手/专辑/时长/大小/码率/渠道。',
-            '回复编号下载: 1 或 1 2; 全部: a/all/全部',
-            '翻页: n/下一页, p/上一页, page 2/第 2 页',
-            '换源: r1 或 换源1; 取消: 取消 或 /music_cancel',
-            '来源能力: /music_sources',
-            '发送方式配置: sendMode=record|file|both; forwardSongInfo 控制是否发送歌曲详情。',
-            'go-music-dl 项目地址: https://github.com/guohuiyuan/go-music-dl',
-            'music-lib 项目地址: https://github.com/guohuiyuan/music-lib',
-            '欢迎下载体验 go-music-dl 的 Web 页面、桌面端、安卓端功能。',
+            '# MusicDL 点歌帮助',
+            '',
+            '## 常用命令',
+            '',
+            '| 功能 | 命令 |',
+            '| --- | --- |',
+            '| 搜索单曲 | `/music 周杰伦` |',
+            '| 指定来源 | `/music -s qq,kuwo 稻香` |',
+            '| 搜歌单/专辑 | `/music -t playlist 关键词` / `/music -t album 关键词` |',
+            '| 分页 | `/music -p 2 -ps 20 周杰伦` |',
+            '| 全源 | `/music -s all -t album 周杰伦` |',
+            '| 链接点歌 | `/music https://y.qq.com/n/ryqq/songDetail/xxxx` |',
+            '',
+            '也可以直接发送受支持的音乐链接来点歌。',
+            '',
+            '## 默认源与筛选',
+            '',
+            '- **默认源**：`netease`, `qq`, `kugou`, `kuwo`, `migu`, `qianqian`, `soda`。',
+            '- **普通搜索**：先按 `music-lib` 的会员/版权字段过滤明显不可播歌曲，再按 `go-music-dl` 的 `GetDownloadURL + Range bytes=0-1` 探测可播放性，有效结果优先展示。',
+            '- **搜索渠道**：列表顶部显示完整默认或指定渠道；表格中的 `渠道` 是每首歌的实际来源。',
+            '- **无效原因**：若有效结果不足，会把少量无效结果排在后面，并标注受限、网络或下载探测失败。',
+            '',
+            '## 回复操作',
+            '',
+            '- 回复 `1` 下载第 1 首；回复 `1 2` 批量下载。',
+            '- 回复 `a` / `all` / `全部` 下载当前已加载的全部歌曲。',
+            '- 回复 `n` / `下一页`、`p` / `上一页`、`page 2` / `第 2 页` 翻页。',
+            '- 回复 `r1` / `换源1` 给第 1 首歌换源。',
+            '- 回复 `取消` 或 `/music_cancel` 结束。',
+            '',
+            '## 配置与项目',
+            '',
+            '- **来源能力**：`/music_sources`。',
+            '- **发送方式**：`sendMode=record|file|both`。',
+            '- **歌曲详情**：`forwardSongInfo` 控制是否发送歌曲详情。',
+            '- **go-music-dl**：https://github.com/guohuiyuan/go-music-dl',
+            '- **music-lib**：https://github.com/guohuiyuan/music-lib',
+            '- **体验邀请**：欢迎下载体验 `go-music-dl` 的 Web 页面、桌面端、安卓端功能。',
         ])
 
     def _strip_command(self, text: str, names: set[str]) -> str:
@@ -579,7 +596,20 @@ class MusicDLPlugin(Star):
         return sorted({item.source for item in items if getattr(item, "source", "")})
 
     def _song_status(self, song: Song) -> str:
-        return "❌ 无效" if song.is_invalid else "✅ 有效"
+        if not song.is_invalid:
+            return "✅ 有效"
+        labels = {
+            "restricted": "❌ 受限",
+            "network": "❌ 网络",
+            "http": "❌ HTTP",
+            "unsupported": "❌ 不支持",
+            "download_url": "❌ 下载失败",
+        }
+        label = labels.get(getattr(song, "invalid_type", ""), "❌ 无效")
+        reason = getattr(song, "invalid_reason", "") or ""
+        if reason:
+            return f"{label}：{self._truncate_text(reason, 16)}"
+        return label
 
     def _extract_supported_music_link(self, text: str) -> str:
         for match in re.finditer(r"https?://[^\s]+", text or ""):

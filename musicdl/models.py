@@ -26,6 +26,8 @@ class Song:
     ext: str = ""
     link: str = ""
     is_invalid: bool = False
+    invalid_reason: str = ""
+    invalid_type: str = ""
 
     @property
     def title(self) -> str:

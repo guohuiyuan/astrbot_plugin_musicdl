@@ -193,13 +193,27 @@ class QQProvider(MusicProvider):
         items = (((payload or {}).get("data") or {}).get("song") or {}).get("list") or []
         songs: list[Song] = []
         for item in items[:limit]:
+            pay = item.get("pay") or {}
+            if not self.cookie and _safe_int(pay.get("payplay") or pay.get("pay_play")) == 1:
+                continue
             songmid = str(item.get("songmid") or "").strip()
             if not songmid:
                 continue
             artists = "、".join(str(s.get("name") or "").strip() for s in item.get("singer") or [] if s.get("name"))
             albummid = str(item.get("albummid") or "").strip()
             cover = f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{albummid}.jpg" if albummid else ""
-            extra = {"songmid": songmid, "song_id": str(item.get("songid") or "")}
+            size128 = _safe_int(item.get("size128"))
+            size320 = _safe_int(item.get("size320"))
+            sizeflac = _safe_int(item.get("sizeflac"))
+            size = size128
+            bitrate = 128 if size128 else 0
+            if sizeflac > 0 and self.cookie:
+                size = sizeflac
+                bitrate = int(size * 8 / 1000 / _safe_int(item.get("interval"))) if _safe_int(item.get("interval")) else 800
+            elif size320 > 0:
+                size = size320
+                bitrate = 320
+            extra = {"songmid": songmid, "song_id": str(item.get("songid") or ""), "album_mid": albummid}
             songs.append(Song(
                 id=songmid,
                 source=self.source,
@@ -207,8 +221,12 @@ class QQProvider(MusicProvider):
                 artist=artists or "Unknown",
                 album=str(item.get("albumname") or ""),
                 cover=cover,
-                duration=int(item.get("interval") or 0),
+                duration=_safe_int(item.get("interval")),
                 extra=json.dumps(extra, ensure_ascii=False),
+                album_id=albummid,
+                size=size,
+                bitrate=bitrate,
+                link=f"https://y.qq.com/n/ryqq/songDetail/{songmid}",
             ))
         return songs
 
@@ -236,8 +254,12 @@ class QQProvider(MusicProvider):
     def get_download_url_sync(self, song: Song) -> SourceResponse:
         songmid = _extra(song).get("songmid") or song.id
         guid = str(random.randint(1000000000, 9999999999))
-        prefixes = ["M800", "M500"]
-        exts = ["mp3", "mp3"]
+        if self.cookie:
+            prefixes = ["AI00", "Q001", "Q000", "F000", "O801", "M800", "M500"]
+            exts = ["flac", "flac", "flac", "flac", "ogg", "mp3", "mp3"]
+        else:
+            prefixes = ["M800", "M500"]
+            exts = ["mp3", "mp3"]
         filenames = [f"{prefix}{songmid}{songmid}.{ext}" for prefix, ext in zip(prefixes, exts)]
         payload = {
             "comm": {"cv": 4747474, "ct": 24, "format": "json", "inCharset": "utf-8", "outCharset": "utf-8", "notice": 0, "platform": "yqq.json", "needNewCode": 1, "uin": 0},
@@ -245,10 +267,11 @@ class QQProvider(MusicProvider):
         }
         result = self.post_json("https://u.y.qq.com/cgi-bin/musicu.fcg", payload, {"User-Agent": UA_MOBILE, "Referer": "http://y.qq.com"})
         infos = (((result or {}).get("req_1") or {}).get("data") or {}).get("midurlinfo") or []
-        for filename in filenames:
+        for filename, ext in zip(filenames, exts):
             for info in infos:
                 if info.get("filename") == filename and info.get("purl"):
-                    return SourceResponse("https://ws.stream.qqmusic.qq.com/" + info["purl"], {"Referer": "http://y.qq.com", "User-Agent": UA_MOBILE})
+                    song.ext = song.ext or ext
+                    return SourceResponse("https://ws.stream.qqmusic.qq.com/" + info["purl"], {"Referer": "http://y.qq.com", "User-Agent": UA_PC}, ext)
         raise ProviderError("QQ 音乐未返回可用下载地址，可能需要会员或 Cookie")
 
 
@@ -264,17 +287,33 @@ class KugouProvider(MusicProvider):
         rows = (((payload or {}).get("data") or {}).get("lists") or [])
         songs: list[Song] = []
         for item in rows[:limit]:
-            file_hash = _first(item.get("SQFileHash"), item.get("HQFileHash"), item.get("FileHash"))
-            if not file_hash:
+            privilege = _safe_int(item.get("Privilege") or item.get("privilege"))
+            if privilege == 10 and not self.cookie:
+                continue
+            file_hash = str(item.get("FileHash") or "").strip()
+            final_hash = str(item.get("SQFileHash") or "").strip() if self.cookie and privilege != 10 else file_hash
+            trans = item.get("trans_param") or {}
+            if not final_hash:
+                final_hash = _first(file_hash, item.get("HQFileHash"), item.get("ResFileHash"), trans.get("ogg_128_hash"), item.get("SQFileHash"), trans.get("ogg_320_hash"))
+            if not _is_kugou_hash(final_hash):
                 continue
             image = str(item.get("Image") or "").replace("{size}", "240")
+            size = _kugou_size_for_hash(final_hash, item)
+            duration = _safe_int(item.get("Duration"))
+            bitrate = int(size * 8 / 1000 / duration) if size and duration else 0
             extra = {
-                "hash": file_hash,
-                "file_hash": str(item.get("FileHash") or ""),
+                "hash": final_hash,
+                "file_hash": file_hash,
                 "sq_hash": str(item.get("SQFileHash") or ""),
                 "hq_hash": str(item.get("HQFileHash") or ""),
+                "res_hash": str(item.get("ResFileHash") or ""),
+                "ogg_320_hash": str(trans.get("ogg_320_hash") or ""),
+                "ogg_128_hash": str(trans.get("ogg_128_hash") or ""),
+                "audio_id": str(item.get("Audioid") or item.get("AudioID") or ""),
+                "album_id": str(item.get("AlbumID") or ""),
+                "privilege": str(privilege),
             }
-            songs.append(Song(file_hash, self.source, str(item.get("SongName") or "Unknown"), str(item.get("SingerName") or "Unknown"), str(item.get("AlbumName") or ""), image, int(item.get("Duration") or 0), json.dumps(extra, ensure_ascii=False)))
+            songs.append(Song(final_hash, self.source, str(item.get("SongName") or "Unknown"), str(item.get("SingerName") or "Unknown"), str(item.get("AlbumName") or ""), image, duration, json.dumps(extra, ensure_ascii=False), album_id=str(item.get("AlbumID") or ""), size=size, bitrate=bitrate, link=f"https://www.kugou.com/song/#hash={final_hash}"))
         return songs
 
     def parse_sync(self, link: str) -> Song | None:
@@ -376,10 +415,13 @@ class KuwoProvider(MusicProvider):
         rows = (payload or {}).get("abslist") or []
         songs: list[Song] = []
         for item in rows[:limit]:
+            if _safe_int(item.get("bitSwitch")) == 0:
+                continue
             rid = str(item.get("MUSICRID") or "").replace("MUSIC_", "").strip()
             if not rid:
                 continue
-            songs.append(Song(rid, self.source, str(item.get("SONGNAME") or "Unknown"), str(item.get("ARTIST") or "Unknown"), str(item.get("ALBUM") or ""), str(item.get("hts_MVPIC") or ""), _safe_int(item.get("DURATION")), json.dumps({"rid": rid}, ensure_ascii=False)))
+            minfo = str(item.get("MINFO") or "")
+            songs.append(Song(rid, self.source, str(item.get("SONGNAME") or "Unknown"), str(item.get("ARTIST") or "Unknown"), str(item.get("ALBUM") or ""), str(item.get("hts_MVPIC") or ""), _safe_int(item.get("DURATION")), json.dumps({"rid": rid}, ensure_ascii=False), size=_kuwo_size_from_minfo(minfo), bitrate=_kuwo_bitrate_from_minfo(minfo), link=f"http://www.kuwo.cn/play_detail/{rid}"))
         return songs
 
     def parse_sync(self, link: str) -> Song | None:
@@ -447,11 +489,32 @@ class MiguProvider(MusicProvider):
         if not content_id:
             return None
         formats = item.get("rateFormats") or []
-        picked = formats[0] if formats else {}
-        for candidate in formats:
-            if str(candidate.get("formatType") or "").upper() in {"SQ", "HQ", "PQ"}:
-                picked = candidate
-                break
+        if not formats:
+            return None
+        candidates: list[tuple[int, int, str]] = []
+        pq_size = 0
+        duration = _safe_int(item.get("duration") or item.get("length"))
+        for index, candidate in enumerate(formats):
+            size = _safe_int(candidate.get("androidSize") or candidate.get("size"))
+            ext = str(candidate.get("androidFileType") or candidate.get("fileType") or "").strip().lower().lstrip(".")
+            format_type = str(candidate.get("formatType") or "").upper()
+            if format_type == "PQ" and size > 0:
+                pq_size = size
+            if duration <= 0 and size > 0:
+                bitrate_hint = {"PQ": 128000, "HQ": 320000, "LQ": 64000}.get(format_type, 0)
+                if bitrate_hint > 0:
+                    duration = int((size * 8) / bitrate_hint)
+            price = _safe_int(candidate.get("price"))
+            tags = {str(tag).strip().lower() for tag in candidate.get("showTag") or []}
+            hidden_paid = str(item.get("chargeAuditions") or "") == "1" and price >= 200
+            if "vip" in tags or hidden_paid:
+                continue
+            candidates.append((index, size, ext))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda value: value[1], reverse=True)
+        best_index, best_size, best_ext = candidates[0]
+        picked = formats[best_index]
         resource_type = str(picked.get("resourceType") or "2")
         format_type = str(picked.get("formatType") or "PQ")
         singers = item.get("singers") or item.get("artists") or []
@@ -460,8 +523,12 @@ class MiguProvider(MusicProvider):
         album = str((albums[0] or {}).get("name") if albums else item.get("album") or "")
         images = item.get("imgItems") or item.get("albumImgs") or []
         cover = str((images[0] or {}).get("img") if images else "")
-        extra = {"content_id": content_id, "resource_type": resource_type, "format_type": format_type}
-        return Song(f"{content_id}|{resource_type}|{format_type}", self.source, str(item.get("songName") or item.get("name") or "Unknown"), artist, album, cover, 0, json.dumps(extra, ensure_ascii=False))
+        display_size = pq_size or best_size
+        bitrate = int(best_size * 8 / 1000 / duration) if best_size and duration else 0
+        link_id = _first(item.get("contentId"), item.get("copyrightId"), content_id)
+        extra = {"content_id": content_id, "resource_type": resource_type, "format_type": format_type, "copyright_id": str(item.get("copyrightId") or "")}
+        return Song(f"{content_id}|{resource_type}|{format_type}", self.source, str(item.get("songName") or item.get("name") or "Unknown"), artist, album, cover, duration, json.dumps(extra, ensure_ascii=False), size=display_size, bitrate=bitrate, ext=best_ext, link=f"https://music.migu.cn/v3/music/song/{link_id}")
+
 
 
 class MusicAggregator:
@@ -503,11 +570,12 @@ class MusicAggregator:
                 await self.probe_song(parsed)
             return [parsed] if parsed else []
         selected = self._selected_sources(sources, SEARCH_TYPE_SONG)
-        tasks = [self._safe_search(provider, keyword, result_limit) for provider in selected]
+        candidate_limit = _probe_candidate_limit(result_limit, len(selected))
+        tasks = [self._safe_search(provider, keyword, candidate_limit) for provider in selected]
         groups = await asyncio.gather(*tasks)
-        result = _round_robin_merge(groups, result_limit)
-        await self.probe_songs(result)
-        return result
+        candidates = _round_robin_merge(groups, candidate_limit)
+        await self.probe_songs(candidates)
+        return _valid_first(candidates, result_limit)
 
     async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None, limit: int | None = None) -> list[Collection]:
         result_limit = max(1, limit or self.page_size)
@@ -579,26 +647,22 @@ class MusicAggregator:
     def _probe_song_sync(self, song: Song) -> Song:
         if song.size > 0 and song.duration > 0 and song.bitrate <= 0:
             song.bitrate = int((song.size * 8) / int(song.duration) / 1000)
-        if song.size > 0 and song.bitrate > 0:
-            return song
         provider = self.providers.get(song.source)
         if not provider:
-            song.is_invalid = True
+            _mark_song_invalid(song, "unsupported source", "unsupported")
             return song
         try:
             source = provider.get_download_url_sync(song)
             if not source.url:
-                song.is_invalid = True
+                _mark_song_invalid(song, "下载地址为空", "download_url")
                 return song
-            headers = dict(source.headers or {})
-            headers.setdefault("User-Agent", UA_PC)
-            headers["Range"] = "bytes=0-1"
+            headers = _source_request_headers(song.source, dict(source.headers or {}), "bytes=0-1", getattr(provider, "cookie", ""))
             req = Request(source.url, headers=headers)
             with urlopen(req, timeout=self.probe_timeout) as resp:
                 status = getattr(resp, "status", resp.getcode())
                 response_headers = dict(resp.headers.items())
             if status not in (200, 206):
-                song.is_invalid = True
+                _mark_song_invalid(song, f"下载探测 HTTP {status}", "http")
                 return song
             size = _probe_size_from_headers(response_headers)
             content_type = _header_value(response_headers, "Content-Type").split(";", 1)[0].strip().lower()
@@ -609,9 +673,11 @@ class MusicAggregator:
             if not song.ext:
                 song.ext = getattr(source, "extension", "") or _ext_from_url_or_type(source.url, content_type)
             song.url = source.url
-            song.is_invalid = False
-        except Exception:
-            song.is_invalid = True
+            _mark_song_valid(song)
+        except HTTPError as exc:
+            _mark_song_invalid(song, f"下载探测 HTTP {exc.code}", _invalid_type_from_error(exc))
+        except Exception as exc:
+            _mark_song_invalid(song, str(exc), _invalid_type_from_error(exc))
         return song
 
     async def _safe_search(self, provider: MusicProvider, keyword: str, limit: int) -> list[Song]:
@@ -689,7 +755,8 @@ class MusicAggregator:
         return None
 
     def _download_sync(self, song: Song, source: SourceResponse) -> tuple[Path, bytes]:
-        headers = dict(source.headers or {})
+        provider = self.providers.get(song.source)
+        headers = _source_request_headers(song.source, dict(source.headers or {}), "", getattr(provider, "cookie", "") if provider else "")
         data, response_headers = _http_bytes(source.url, headers, self.timeout)
         if getattr(source, "post_process", None):
             data = source.post_process(data)
@@ -1173,6 +1240,138 @@ def _http_bytes(url: str, headers: dict[str, str], timeout: float) -> tuple[byte
         raise ProviderError(str(exc.reason)) from exc
 
 
+def _probe_candidate_limit(result_limit: int, source_count: int) -> int:
+    base = max(result_limit * 3, result_limit + max(1, source_count) * 5)
+    return min(max(result_limit, base), 200)
+
+
+def _valid_first(songs: list[Song], limit: int) -> list[Song]:
+    valid: list[Song] = []
+    invalid: list[Song] = []
+    seen: set[tuple[str, str]] = set()
+    for song in songs:
+        key = (song.source or "", song.id or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        if song.is_invalid:
+            invalid.append(song)
+        else:
+            valid.append(song)
+    if len(valid) >= limit:
+        return valid[:limit]
+    return (valid + invalid)[:limit]
+
+
+def _mark_song_valid(song: Song) -> None:
+    song.is_invalid = False
+    song.invalid_reason = ""
+    song.invalid_type = ""
+
+
+def _mark_song_invalid(song: Song, reason: object, invalid_type: str = "download_url") -> None:
+    song.is_invalid = True
+    song.invalid_reason = re.sub(r"\s+", " ", str(reason or "")).strip()[:160]
+    song.invalid_type = invalid_type or "download_url"
+
+
+def _invalid_type_from_status(status: object) -> str:
+    code = _safe_int(status)
+    if code in (401, 403, 451):
+        return "restricted"
+    return "http"
+
+
+def _invalid_type_from_error(exc: object) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, HTTPError):
+        if getattr(exc, "code", 0) in (401, 403, 451):
+            return "restricted"
+        return "http"
+    if any(word in text for word in ("vip", "会员", "cookie", "版权", "受限", "restricted", "pay", "privilege", "401", "403", "451")):
+        return "restricted"
+    if any(word in text for word in ("timed out", "timeout", "tls", "ssl", "connection", "reset", "refused", "network", "网络", "风控")):
+        return "network"
+    return "download_url"
+
+
+def _source_request_headers(source: str, headers: dict[str, str] | None = None, range_header: str = "", cookie: str = "") -> dict[str, str]:
+    result = {"User-Agent": UA_PC}
+    if source == "bilibili":
+        result["Referer"] = "https://www.bilibili.com/"
+    if source == "netease":
+        result["Referer"] = "http://music.163.com/"
+    if source == "migu":
+        result["User-Agent"] = UA_MOBILE
+        result["Referer"] = "http://music.migu.cn/"
+    if source == "qq":
+        result["Referer"] = "http://y.qq.com"
+    if cookie:
+        result["Cookie"] = cookie
+    if headers:
+        result.update({str(key): str(value) for key, value in headers.items() if value is not None})
+    if range_header:
+        result["Range"] = range_header
+    return result
+
+
+def _is_kugou_hash(value: object) -> bool:
+    return bool(re.fullmatch(r"(?i)[a-f0-9]{32}", str(value or "").strip()))
+
+
+def _kugou_size_for_hash(hash_value: str, item: dict[str, Any]) -> int:
+    trans = item.get("trans_param") or {}
+    pairs = [
+        (item.get("SQFileHash"), item.get("SQFileSize")),
+        (item.get("HQFileHash"), item.get("HQFileSize")),
+        (item.get("ResFileHash"), item.get("ResFileSize")),
+        (trans.get("ogg_320_hash"), trans.get("ogg_320_filesize")),
+        (trans.get("ogg_128_hash"), trans.get("ogg_128_filesize")),
+        (item.get("FileHash"), item.get("FileSize")),
+    ]
+    for current_hash, size in pairs:
+        if str(current_hash or "").strip().lower() == str(hash_value or "").strip().lower():
+            return _safe_int(size)
+    return _safe_int(item.get("FileSize"))
+
+
+def _kuwo_formats_from_minfo(minfo: str) -> list[dict[str, Any]]:
+    formats: list[dict[str, Any]] = []
+    for part in str(minfo or "").split(";"):
+        values: dict[str, str] = {}
+        for attr in part.split(","):
+            if ":" not in attr:
+                continue
+            key, value = attr.split(":", 1)
+            values[key.strip()] = value.strip()
+        size_text = values.get("size", "").lower().removesuffix("mb")
+        try:
+            size = int(float(size_text) * 1024 * 1024)
+        except ValueError:
+            size = 0
+        if values:
+            formats.append({"format": values.get("format", ""), "bitrate": values.get("bitrate", ""), "size": size})
+    return formats
+
+
+def _kuwo_size_from_minfo(minfo: str) -> int:
+    formats = _kuwo_formats_from_minfo(minfo)
+    for target_format, target_bitrate in (("mp3", "128"), ("mp3", "320"), ("flac", ""), ("flac", "2000")):
+        for item in formats:
+            if item.get("format") == target_format and (not target_bitrate or item.get("bitrate") == target_bitrate):
+                return _safe_int(item.get("size"))
+    return max((_safe_int(item.get("size")) for item in formats), default=0)
+
+
+def _kuwo_bitrate_from_minfo(minfo: str) -> int:
+    formats = _kuwo_formats_from_minfo(minfo)
+    for target_format, target_bitrate, fallback in (("mp3", "128", 128), ("mp3", "320", 320), ("flac", "2000", 2000), ("flac", "", 800)):
+        for item in formats:
+            if item.get("format") == target_format and (not target_bitrate or item.get("bitrate") == target_bitrate):
+                return _safe_int(item.get("bitrate")) or fallback
+    return 128 if minfo else 0
+
+
 def _default_sources_for_search_type(search_type: str) -> list[str]:
     if search_type == SEARCH_TYPE_PLAYLIST:
         return [name for name in ALL_SOURCE_NAMES if name not in UNAVAILABLE_PLAYLIST_SOURCE_NAMES]
@@ -1231,8 +1430,11 @@ def _first(*values: object) -> str:
 def _safe_int(value: object) -> int:
     try:
         return int(str(value or "0"))
-    except ValueError:
-        return 0
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value or "0")))
+        except (TypeError, ValueError):
+            return 0
 
 
 def _safe_filename(value: str) -> str:

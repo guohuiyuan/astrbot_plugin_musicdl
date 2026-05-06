@@ -126,6 +126,12 @@ QIANQIAN_SECRET = "0b50b02fd0d73a9c4c8c3a781c30845f"
 JOOX_DEFAULT_COOKIE = "wmid=142420656; user_type=1; country=id; session_key=2a5d97d05dc8fe238150184eaf3519ad;"
 JOOX_X_FORWARDED_FOR = "36.73.34.109"
 JAMENDO_X_VERSION = "4gvfvv"
+NETEASE_LINUX_API_KEY_HEX = "7246674226682325323F5E6544673A51"
+NETEASE_WEAPI_NONCE = "0CoJUm6Qyw8W8jud"
+NETEASE_WEAPI_IV = "0102030405060708"
+NETEASE_WEAPI_PUB_KEY = "010001"
+NETEASE_WEAPI_PUB_MODULUS = "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
+NETEASE_EAPI_KEY = "e82ckenh8dichen8"
 
 ALL_SOURCE_NAMES = ["netease", "qq", "kugou", "kuwo", "migu", "fivesing", "jamendo", "joox", "qianqian", "soda", "bilibili"]
 DEFAULT_SOURCE_NAMES = ["netease", "qq", "kugou", "kuwo", "migu", "qianqian", "soda"]
@@ -148,28 +154,125 @@ def source_description(source: str) -> str:
     return SOURCE_DESCRIPTIONS.get(source, source)
 
 
+def _netease_size_from_item(item: dict[str, Any], privilege: object) -> int:
+    h = item.get("h") or item.get("hMusic") or {}
+    m = item.get("m") or item.get("mMusic") or {}
+    l = item.get("l") or item.get("lMusic") or {}
+    fl = _safe_extra_int((privilege or {}).get("fl") if isinstance(privilege, dict) else 0)
+    if fl >= 320000 and _safe_extra_int(h.get("size")) > 0:
+        return _safe_extra_int(h.get("size"))
+    if fl >= 192000 and _safe_extra_int(m.get("size")) > 0:
+        return _safe_extra_int(m.get("size"))
+    return _safe_extra_int(l.get("size") or m.get("size") or h.get("size"))
+
+
+def _netease_preferred_levels(song: Song) -> list[str]:
+    level = (_extra(song).get("netease_level") or _extra(song).get("level") or "").strip().lower()
+    if level in {"standard", "exhigh", "lossless", "hires"}:
+        return [level]
+    return ["lossless", "hires", "exhigh"]
+
+
+def _netease_audio_ext(audio_type: str, quality: str) -> str:
+    value = str(audio_type or "").strip().lower().lstrip(".")
+    if value in {"flac", "mp3", "m4a"}:
+        return value
+    if quality in {"lossless", "hires"}:
+        return "flac"
+    return ""
+
+
+def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    padding = block_size - len(data) % block_size
+    return data + bytes([padding]) * padding
+
+
+def _aes_ecb_encrypt(data: bytes, key: bytes) -> bytes:
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except Exception as exc:
+        raise ProviderError("网易云加密需要 cryptography 库") from exc
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(_pkcs7_pad(data)) + encryptor.finalize()
+
+
+def _aes_cbc_encrypt_text(text: str, key: str, iv: str) -> str:
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except Exception as exc:
+        raise ProviderError("网易云加密需要 cryptography 库") from exc
+    cipher = Cipher(algorithms.AES(key.encode("utf-8")), modes.CBC(iv.encode("utf-8")))
+    encryptor = cipher.encryptor()
+    data = encryptor.update(_pkcs7_pad(text.encode("utf-8"))) + encryptor.finalize()
+    return base64.b64encode(data).decode("ascii")
+
+
+def _netease_encrypt_linux(data: str) -> str:
+    return _aes_ecb_encrypt(data.encode("utf-8"), bytes.fromhex(NETEASE_LINUX_API_KEY_HEX)).hex().upper()
+
+
+def _netease_encrypt_weapi(text: str) -> tuple[str, str]:
+    letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    sec_key = ''.join(random.choice(letters) for _ in range(16))
+    params = _aes_cbc_encrypt_text(_aes_cbc_encrypt_text(text, NETEASE_WEAPI_NONCE, NETEASE_WEAPI_IV), sec_key, NETEASE_WEAPI_IV)
+    reversed_key = sec_key[::-1].encode("utf-8").hex()
+    encrypted_key = pow(int(reversed_key, 16), int(NETEASE_WEAPI_PUB_KEY, 16), int(NETEASE_WEAPI_PUB_MODULUS, 16))
+    return params, f"{encrypted_key:0256x}"
+
+
+def _netease_encrypt_eapi(url_path: str, payload: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(url_path)
+    path = parsed.path or url_path
+    path = path.replace("/eapi/", "/api/")
+    digest = hashlib.md5(f"nobody{path}use{payload}md5forencrypt".encode("utf-8")).hexdigest()
+    data = f"{path}-36cd479b6b5-{payload}-36cd479b6b5-{digest}"
+    return _aes_ecb_encrypt(data.encode("utf-8"), NETEASE_EAPI_KEY.encode("utf-8")).hex()
+
+
 class NeteaseProvider(MusicProvider):
     source = "netease"
 
     def search_sync(self, keyword: str, limit: int) -> list[Song]:
+        try:
+            payload = self._cloud_search(keyword, limit)
+            rows = (((payload or {}).get("result") or {}).get("songs") or [])
+            songs = [song for item in rows[:limit] if (song := self._song_from_search_item(item))]
+            if songs:
+                return songs
+        except Exception as exc:
+            logger.debug(f"[MusicDL] netease cloud search fallback: {exc}")
         payload = self.post_form_json(
             "https://music.163.com/api/search/get/web?csrf_token=",
             {"s": keyword, "type": 1, "offset": 0, "limit": limit},
             {"Referer": "https://music.163.com/"},
         )
         rows = (((payload or {}).get("result") or {}).get("songs") or [])
-        songs: list[Song] = []
-        for item in rows[:limit]:
-            song_id = str(item.get("id") or "").strip()
-            if not song_id:
-                continue
-            artists = item.get("artists") or item.get("ar") or []
-            artist = "、".join(str(a.get("name") or "").strip() for a in artists if a.get("name"))
-            album_obj = item.get("album") or item.get("al") or {}
-            cover = str(album_obj.get("picUrl") or "")
-            duration = int((item.get("duration") or item.get("dt") or 0) / 1000)
-            songs.append(Song(song_id, self.source, str(item.get("name") or "Unknown"), artist or "Unknown", str(album_obj.get("name") or ""), cover, duration, _extra_json({"song_id": song_id})))
-        return songs
+        return [song for item in rows[:limit] if (song := self._song_from_search_item(item))]
+
+    def _cloud_search(self, keyword: str, limit: int) -> dict[str, Any]:
+        eparams = {"method": "POST", "url": "http://music.163.com/api/cloudsearch/pc", "params": {"s": keyword, "type": 1, "offset": 0, "limit": limit}}
+        encrypted = _netease_encrypt_linux(json.dumps(eparams, ensure_ascii=False, separators=(",", ":")))
+        return self.post_form_json("http://music.163.com/api/linux/forward", {"eparams": encrypted}, {"Referer": "http://music.163.com/"})
+
+    def _song_from_search_item(self, item: dict[str, Any]) -> Song | None:
+        song_id = str(item.get("id") or "").strip()
+        if not song_id:
+            return None
+        privilege = item.get("privilege") or {}
+        if isinstance(privilege, dict) and not self.cookie and _safe_extra_int(privilege.get("fl")) == 0:
+            return None
+        artists = item.get("artists") or item.get("ar") or []
+        artist = "、".join(str(a.get("name") or "").strip() for a in artists if a.get("name"))
+        album_obj = item.get("album") or item.get("al") or {}
+        duration = int((item.get("duration") or item.get("dt") or 0) / 1000)
+        size = _netease_size_from_item(item, privilege)
+        bitrate = int(size * 8 / 1000 / duration) if size and duration else 0
+        extra = {"song_id": song_id}
+        if isinstance(privilege, dict):
+            extra.update({"privilege_fl": str(privilege.get("fl") or ""), "privilege_pl": str(privilege.get("pl") or ""), "fee": str(privilege.get("fee") or "")})
+        return Song(song_id, self.source, str(item.get("name") or "Unknown"), artist or "Unknown", str(album_obj.get("name") or ""), str(album_obj.get("picUrl") or ""), duration, _extra_json(extra), size=size, bitrate=bitrate, link=f"https://music.163.com/#/song?id={song_id}")
 
     def parse_sync(self, link: str) -> Song | None:
         match = re.search(r"[?&]id=(\d+)|song\?id=(\d+)", link)
@@ -180,7 +283,36 @@ class NeteaseProvider(MusicProvider):
 
     def get_download_url_sync(self, song: Song) -> SourceResponse:
         song_id = _extra(song).get("song_id") or song.id
-        return SourceResponse(f"https://music.163.com/song/media/outer/url?id={song_id}.mp3", {"Referer": "https://music.163.com/", "User-Agent": UA_PC}, "mp3")
+        if self.cookie:
+            for level in _netease_preferred_levels(song):
+                try:
+                    url, ext = self._get_eapi_download_url(song_id, level)
+                    if url:
+                        song.ext = song.ext or ext
+                        return SourceResponse(url, {"Referer": "http://music.163.com/", "User-Agent": UA_PC}, ext)
+                except Exception:
+                    continue
+        payload = {"ids": [str(song_id)], "br": 320000}
+        params, enc_sec_key = _netease_encrypt_weapi(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        result = self.post_form_json("http://music.163.com/weapi/song/enhance/player/url", {"params": params, "encSecKey": enc_sec_key}, {"Referer": "http://music.163.com/"})
+        data = (result or {}).get("data") or []
+        if data and data[0].get("url"):
+            br = _safe_extra_int(data[0].get("br"))
+            if br and not song.bitrate:
+                song.bitrate = int(br / 1000) if br > 1000 else br
+            song.ext = song.ext or "mp3"
+            return SourceResponse(str(data[0]["url"]), {"Referer": "http://music.163.com/", "User-Agent": UA_PC}, song.ext)
+        raise ProviderError("网易云未返回可用下载地址，可能需要会员、Cookie 或歌曲版权受限")
+
+    def _get_eapi_download_url(self, song_id: str, level: str) -> tuple[str, str]:
+        payload = {"ids": [_safe_extra_int(song_id)], "level": level, "encodeType": "flac", "header": "{\"os\":\"pc\",\"appver\":\"\",\"osver\":\"\",\"deviceId\":\"pyncm!\",\"requestId\":\"12345678\"}"}
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        params = _netease_encrypt_eapi("https://interface3.music.163.com/eapi/song/enhance/player/url/v1", raw)
+        result = self.post_form_json("https://interface3.music.163.com/eapi/song/enhance/player/url/v1", {"params": params}, {"Referer": "http://music.163.com/"})
+        data = (result or {}).get("data") or []
+        if not data or not data[0].get("url"):
+            raise ProviderError("网易云 EAPI 未返回下载地址")
+        return str(data[0].get("url") or ""), _netease_audio_ext(str(data[0].get("type") or ""), level)
 
 
 class FivesingProvider(MusicProvider):
@@ -369,7 +501,9 @@ class QianqianProvider(MusicProvider):
             if not tsid:
                 continue
             artist = _join_qianqian_artists(item.get("artist") or [])
-            songs.append(Song(tsid, self.source, str(item.get("title") or "Unknown"), artist or "Unknown", str(item.get("albumTitle") or ""), str(item.get("pic") or ""), int(item.get("duration") or 0), _extra_json({"tsid": tsid})))
+            size, bitrate = _qianqian_rate_stats(item.get("rateFileInfo") or {}, _safe_extra_int(item.get("duration")))
+            album_id = _qianqian_album_id(str(item.get("albumAssetCode") or ""))
+            songs.append(Song(tsid, self.source, str(item.get("title") or "Unknown"), artist or "Unknown", str(item.get("albumTitle") or ""), str(item.get("pic") or ""), _safe_extra_int(item.get("duration")), _extra_json({"tsid": tsid, "album_id": album_id}), album_id=album_id, size=size, bitrate=bitrate, link=f"https://music.91q.com/song/{tsid}"))
         return songs
 
     def parse_sync(self, link: str) -> Song | None:
