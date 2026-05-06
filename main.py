@@ -179,11 +179,14 @@ class MusicDLPlugin(Star):
                 yield event.plain_result("已经是第一页。")
                 return
             try:
+                old_song_count = len(state.songs)
                 message = await self._format_state_page(state, page)
             except Exception as exc:
                 logger.warning(f"[MusicDL] 翻页失败: {exc}")
                 yield event.plain_result(f"翻页失败: {exc}")
                 return
+            if state.search_type == SEARCH_TYPE_SONG and len(state.songs) > old_song_count:
+                self._schedule_probe_update(event, event.unified_msg_origin, state)
             yield event.plain_result(message)
             return
 
@@ -620,7 +623,7 @@ class MusicDLPlugin(Star):
         if page < 1:
             page = 1
         if page > self._page_total(loaded, page_size) and state.reloadable:
-            results = await self.music.search(state.keyword, state.search_type, state.sources, limit=self._loaded_limit(page, page_size))
+            results = await self.music.search(state.keyword, state.search_type, state.sources, limit=self._loaded_limit(page, page_size), probe=False)
             if state.search_type == SEARCH_TYPE_SONG:
                 state.songs = [item for item in results if isinstance(item, Song)]
                 state.collections = []
