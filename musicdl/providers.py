@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import mimetypes
 import os
@@ -33,6 +34,17 @@ from .extra_providers import (
 UA_PC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
 MIGU_MAGIC_USER_ID = "15548614588710179085069"
+UNAVAILABLE_PLAYLIST_SOURCE_NAMES = {"migu", "jamendo"}
+
+
+def _decode_response_body(data: bytes, headers: dict[str, str]) -> bytes:
+    encoding = str(headers.get("Content-Encoding") or headers.get("content-encoding") or "").lower()
+    if "gzip" in encoding or data.startswith(b"\x1f\x8b"):
+        try:
+            return gzip.decompress(data)
+        except OSError:
+            return data
+    return data
 
 
 class ProviderError(RuntimeError):
@@ -111,7 +123,9 @@ class MusicProvider:
         req = Request(url, data=raw, headers=req_headers, method="POST")
         try:
             with urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                headers = dict(resp.headers.items())
+                data = _decode_response_body(resp.read(), headers)
+                return json.loads(data.decode("utf-8", errors="replace"))
         except (HTTPError, URLError) as exc:
             raise ProviderError(str(exc)) from exc
 
@@ -134,7 +148,9 @@ class MusicProvider:
         try:
             open_func = opener.open if opener else urlopen
             with open_func(req, timeout=self.timeout) as resp:
-                return resp.read(), dict(resp.headers.items())
+                headers = dict(resp.headers.items())
+                data = _decode_response_body(resp.read(), headers)
+                return data, headers
         except HTTPError as exc:
             if no_redirect and exc.code in (301, 302, 303, 307, 308):
                 return b"", dict(exc.headers.items())
@@ -465,7 +481,7 @@ class MusicAggregator:
         for name, provider in self.providers.items():
             result[name] = {
                 "song": callable(getattr(provider, "search", None)),
-                "playlist": _provider_supports(provider, "search_playlist_sync", "search_playlist"),
+                "playlist": name not in UNAVAILABLE_PLAYLIST_SOURCE_NAMES and _provider_supports(provider, "search_playlist_sync", "search_playlist"),
                 "album": _provider_supports(provider, "search_album_sync", "search_album"),
                 "default": name in DEFAULT_SOURCE_NAMES,
             }
@@ -648,9 +664,15 @@ def _qq_song_from_info(info: dict[str, Any]) -> Song:
     )
 
 
+def _kuwo_legacy_json(provider: KuwoProvider, url: str) -> dict[str, Any]:
+    data, _ = provider.get_bytes(url, {"User-Agent": UA_PC})
+    text = data.decode("utf-8", errors="replace").replace("'", '"')
+    return json.loads(text)
+
+
 def _kuwo_search_collection(self: KuwoProvider, keyword: str, limit: int, kind: str) -> list[Collection]:
     params = urlencode({"all": keyword, "ft": "album" if kind == SEARCH_TYPE_ALBUM else "playlist", "itemset": "web_2013", "client": "kt", "pcmp4": 1, "geo": "c", "vipver": 1, "pn": 0, "rn": limit, "rformat": "json", "encoding": "utf8"})
-    payload = self.get_json(f"http://search.kuwo.cn/r.s?{params}", {"User-Agent": UA_PC})
+    payload = _kuwo_legacy_json(self, f"http://search.kuwo.cn/r.s?{params}")
     rows = (payload or {}).get("albumlist" if kind == SEARCH_TYPE_ALBUM else "abslist") or []
     result: list[Collection] = []
     for item in rows[:limit]:
@@ -692,7 +714,7 @@ def _kuwo_get_playlist_songs_sync(self: KuwoProvider, collection: Collection) ->
 
 def _kuwo_get_album_songs_sync(self: KuwoProvider, collection: Collection) -> list[Song]:
     params = urlencode({"pn": 0, "rn": 100, "stype": "albuminfo", "albumid": collection.id, "sortby": 0, "alflac": 1, "show_copyright_off": 1, "pcmp4": 1, "encoding": "utf8", "vipver": 1, "rformat": "json"})
-    payload = self.get_json(f"http://search.kuwo.cn/r.s?{params}", {"User-Agent": UA_PC})
+    payload = _kuwo_legacy_json(self, f"http://search.kuwo.cn/r.s?{params}")
     rows = (payload or {}).get("musiclist") or (payload or {}).get("abslist") or []
     songs = [_kuwo_song_from_item(item, collection) for item in rows if item.get("id") or item.get("MUSICRID")]
     if songs:
@@ -948,6 +970,8 @@ def _looks_like_audio(data: bytes, content_type: str, detected_ext: str) -> bool
     stripped = data[:256].lstrip().lower()
     if stripped.startswith((b"<!doctype html", b"<html", b"{", b"[")):
         return False
+    if detected_ext:
+        return True
     if content_type.startswith(("audio/", "video/")):
         return True
     if content_type in {"", "application/octet-stream", "binary/octet-stream"}:
@@ -969,7 +993,9 @@ def _http_bytes(url: str, headers: dict[str, str], timeout: float) -> tuple[byte
     req = Request(url, headers=req_headers)
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return resp.read(), dict(resp.headers.items())
+            headers = dict(resp.headers.items())
+            data = _decode_response_body(resp.read(), headers)
+            return data, headers
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise ProviderError(body.strip() or f"HTTP {exc.code}") from exc

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import base64
 import hashlib
 import html
@@ -12,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlencode
+from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 
 from astrbot.api import logger
@@ -21,6 +22,16 @@ from .models import Collection, SEARCH_TYPE_ALBUM, SEARCH_TYPE_PLAYLIST, Song
 
 UA_PC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
+
+
+def _decode_response_body(data: bytes, headers: dict[str, str]) -> bytes:
+    encoding = str(headers.get("Content-Encoding") or headers.get("content-encoding") or "").lower()
+    if "gzip" in encoding or data.startswith(b"\x1f\x8b"):
+        try:
+            return gzip.decompress(data)
+        except OSError:
+            return data
+    return data
 
 
 class ProviderError(RuntimeError):
@@ -74,7 +85,9 @@ class MusicProvider:
         req = Request(url, data=raw, headers=req_headers, method="POST")
         try:
             with urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                headers = dict(resp.headers.items())
+                data = _decode_response_body(resp.read(), headers)
+                return json.loads(data.decode("utf-8", errors="replace"))
         except (HTTPError, URLError) as exc:
             raise ProviderError(str(exc)) from exc
 
@@ -97,7 +110,9 @@ class MusicProvider:
         try:
             open_func = opener.open if opener else urlopen
             with open_func(req, timeout=self.timeout) as resp:
-                return resp.read(), dict(resp.headers.items())
+                headers = dict(resp.headers.items())
+                data = _decode_response_body(resp.read(), headers)
+                return data, headers
         except HTTPError as exc:
             if no_redirect and exc.code in (301, 302, 303, 307, 308):
                 return b"", dict(exc.headers.items())
@@ -431,7 +446,7 @@ class BilibiliProvider(MusicProvider):
 
     def search_sync(self, keyword: str, limit: int) -> list[Song]:
         params = urlencode({"search_type": "video", "keyword": keyword, "page": 1, "page_size": limit})
-        payload = self.get_json(f"https://api.bilibili.com/x/web-interface/search/type?{params}", {"User-Agent": UA_PC, "Referer": "https://www.bilibili.com/"})
+        payload = self.get_json(f"https://api.bilibili.com/x/web-interface/search/type?{params}", _bilibili_search_headers())
         rows = (((payload or {}).get("data") or {}).get("result") or [])
         songs: list[Song] = []
         for item in rows[:limit]:
@@ -577,14 +592,14 @@ def _netease_search_playlist_sync(self: NeteaseProvider, keyword: str, limit: in
 
 
 def _netease_get_album_songs_sync(self: NeteaseProvider, collection: Collection) -> list[Song]:
-    payload = self.get_json(f"https://music.163.com/api/album/{collection.id}", {"Referer": "https://music.163.com/"})
-    rows = (payload or {}).get("songs") or []
+    payload = self.get_json(f"https://music.163.com/api/v1/album/{collection.id}", {"Referer": "https://music.163.com/"})
+    rows = (payload or {}).get("songs") or (((payload or {}).get("album") or {}).get("songs") or [])
     return [_netease_song_from_item(item) for item in rows if item.get("id")]
 
 
 def _netease_get_playlist_songs_sync(self: NeteaseProvider, collection: Collection) -> list[Song]:
     payload = self.get_json(f"https://music.163.com/api/playlist/detail?id={collection.id}", {"Referer": "https://music.163.com/"})
-    playlist = (payload or {}).get("playlist") or {}
+    playlist = (payload or {}).get("playlist") or (payload or {}).get("result") or {}
     rows = playlist.get("tracks") or []
     return [_netease_song_from_item(item) for item in rows if item.get("id")]
 
@@ -636,13 +651,31 @@ NeteaseProvider.get_album_songs = lambda self, collection: _async_collection_son
 NeteaseProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
 
 
+def _qianqian_album_keywords(keyword: str) -> list[str]:
+    sanitized = _qianqian_sanitize_album_keyword(keyword)
+    values = [keyword]
+    if sanitized and sanitized != keyword:
+        values.append(sanitized)
+    return values
+
+
+def _qianqian_sanitize_album_keyword(keyword: str) -> str:
+    separators = {58, 65306, 34, 39, 8220, 8221, 8216, 8217, 40, 41, 65288, 65289, 91, 93, 12304, 12305, 44, 65292, 47, 92, 45, 46}
+    normalized = ''.join(' ' if ord(ch) in separators else ch for ch in keyword)
+    return ' '.join(normalized.split())
+
+
 def _qianqian_search_album_sync(self: QianqianProvider, keyword: str, limit: int) -> list[Collection]:
-    params = _qianqian_signed({"word": keyword, "type": "3", "pageNo": "1", "pageSize": str(limit), "appid": QIANQIAN_APP_ID})
-    payload = self.get_json(f"https://music.91q.com/v1/search?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
-    data = (payload or {}).get("data") or {}
-    if not isinstance(data, dict):
-        return []
-    rows = data.get("typeAlbum") or []
+    rows: list[dict[str, Any]] = []
+    for current_keyword in _qianqian_album_keywords(keyword):
+        params = _qianqian_signed({"word": current_keyword, "type": "3", "pageNo": "1", "pageSize": str(limit), "appid": QIANQIAN_APP_ID})
+        payload = self.get_json(f"https://music.91q.com/v1/search?{urlencode(params)}", {"User-Agent": UA_PC, "Referer": "https://music.91q.com/player"})
+        data = (payload or {}).get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        rows = data.get("typeAlbum") or []
+        if rows:
+            break
     albums: list[Collection] = []
     for item in rows[:limit]:
         album_id = _qianqian_album_id(str(item.get("albumAssetCode") or ""))
@@ -876,11 +909,9 @@ def _extra_collection(collection: Collection) -> dict[str, str]:
 
 
 QianqianProvider.search_album_sync = _qianqian_search_album_sync
-QianqianProvider.search_playlist_sync = _qianqian_search_playlist_sync
 QianqianProvider.get_album_songs_sync = _qianqian_get_album_songs_sync
 QianqianProvider.get_playlist_songs_sync = _qianqian_get_playlist_songs_sync
 QianqianProvider.search_album = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_album_sync")
-QianqianProvider.search_playlist = lambda self, keyword, limit: _async_collection_search(self, keyword, limit, "search_playlist_sync")
 QianqianProvider.get_album_songs = lambda self, collection: _async_collection_songs(self, collection, "get_album_songs_sync")
 QianqianProvider.get_playlist_songs = lambda self, collection: _async_collection_songs(self, collection, "get_playlist_songs_sync")
 SodaProvider.search_album_sync = _soda_search_album_sync
@@ -1040,8 +1071,32 @@ def _joox_search_playlist_sync(self: JooxProvider, keyword: str, limit: int) -> 
 
 def _joox_get_playlist_songs_sync(self: JooxProvider, collection: Collection) -> list[Song]:
     params = urlencode({"id": collection.id, "country": "sg", "lang": "zh_cn"})
-    payload = self.get_json(f"https://cache.api.joox.com/openjoox/v3/playlist?{params}", self._headers())
-    return _joox_songs_from_sections((payload or {}).get("section_list") or [])
+    try:
+        payload = self.get_json(f"https://cache.api.joox.com/openjoox/v3/playlist?{params}", self._headers())
+        songs = _joox_songs_from_sections((payload or {}).get("section_list") or [])
+        if songs:
+            return songs
+    except Exception:
+        pass
+    return _joox_get_playlist_songs_from_page(self, collection)
+
+
+def _joox_get_playlist_songs_from_page(self: JooxProvider, collection: Collection) -> list[Song]:
+    data, _ = self.get_bytes(f"https://www.joox.com/hk/playlist/{quote(collection.id, safe='')}", self._headers())
+    match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', data.decode("utf-8", errors="replace"), re.S)
+    if not match:
+        return []
+    payload = json.loads(match.group(1))
+    props = (((payload.get("props") or {}).get("pageProps") or {}))
+    tracks = (((props.get("allPlaylistTracks") or {}).get("tracks") or {}).get("items") or [])
+    if not tracks:
+        tracks = ((props.get("playlistDetailList") or {}).get("trackList") or [])
+    songs: list[Song] = []
+    for item in tracks:
+        song = _joox_song_from_info(item, collection.name, collection.cover)
+        if song:
+            songs.append(song)
+    return songs
 
 
 def _joox_get_album_songs_sync(self: JooxProvider, collection: Collection) -> list[Song]:
@@ -1091,9 +1146,19 @@ def _normalize_joox_id(value: str) -> str:
     return value.replace(" ", "+")
 
 
+def _bilibili_search_headers() -> dict[str, str]:
+    return {
+        "User-Agent": UA_PC,
+        "Referer": "https://search.bilibili.com/",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cookie": "buvid3=00000000-0000-4000-8000-000000000000infoc; b_nut=1730000000;",
+    }
+
+
 def _bilibili_search_playlist_sync(self: BilibiliProvider, keyword: str, limit: int) -> list[Collection]:
     params = urlencode({"search_type": "video", "keyword": keyword, "page": 1, "page_size": limit})
-    payload = self.get_json(f"https://api.bilibili.com/x/web-interface/search/type?{params}", {"User-Agent": UA_PC, "Referer": "https://www.bilibili.com/"})
+    payload = self.get_json(f"https://api.bilibili.com/x/web-interface/search/type?{params}", _bilibili_search_headers())
     rows = (((payload or {}).get("data") or {}).get("result") or [])
     playlists: list[Collection] = []
     seen: set[str] = set()
