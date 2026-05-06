@@ -380,6 +380,8 @@ class MusicAggregator:
         self.timeout = 30.0
         self.page_size = _safe_int(self.config.get("cliPageSize")) or 50
         self.max_download_bytes = 0
+        self.probe_concurrency = _safe_int(self.config.get("probeConcurrency")) or 5
+        self.probe_timeout = 5.0
         cookies = _normalize_cookies(self.config.get("cookies"))
         self.providers: dict[str, MusicProvider] = {
             "netease": NeteaseProvider(str(cookies.get("netease", "")), self.timeout),
@@ -405,6 +407,8 @@ class MusicAggregator:
     async def search_songs(self, keyword: str, sources: list[str] | None = None) -> list[Song]:
         if keyword.startswith("http://") or keyword.startswith("https://"):
             parsed = await self.parse_link(keyword)
+            if parsed:
+                await self.probe_song(parsed)
             return [parsed] if parsed else []
         selected = self._selected_sources(sources)
         tasks = [self._safe_search(provider, keyword) for provider in selected]
@@ -412,7 +416,9 @@ class MusicAggregator:
         merged: list[Song] = []
         for group in groups:
             merged.extend(group)
-        return merged[: self.page_size]
+        result = merged[: self.page_size]
+        await self.probe_songs(result)
+        return result
 
     async def search_collections(self, keyword: str, search_type: str, sources: list[str] | None = None) -> list[Collection]:
         selected = self._selected_sources(sources)
@@ -437,7 +443,9 @@ class MusicAggregator:
         if not callable(method):
             raise ProviderError(f"{collection.source} does not support expanding {collection.label}")
         songs = await method(collection)
-        return songs[: self.page_size]
+        result = songs[: self.page_size]
+        await self.probe_songs(result)
+        return result
 
     async def switch_source(self, song: Song) -> Song:
         keyword = f"{song.name} {song.artist}".strip()
@@ -445,21 +453,87 @@ class MusicAggregator:
         if not candidates:
             raise ProviderError("未找到可换源结果")
         candidates.sort(key=lambda cand: _similarity(song.name, song.artist, cand.name, cand.artist), reverse=True)
-        return candidates[0]
+        best = candidates[0]
+        await self.probe_song(best)
+        return best
 
     async def download_song(self, song: Song) -> DownloadedFile:
         provider = self.providers.get(song.source)
         if not provider:
-            raise ProviderError(f"不支持的来源：{song.source}")
+            raise ProviderError("unsupported source: " + str(song.source))
         source = await provider.get_download_url(song)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         path, data = await asyncio.to_thread(self._download_sync, song, source)
         await asyncio.to_thread(path.write_bytes, data)
+        if song.size <= 0:
+            song.size = len(data)
+        if song.duration > 0 and song.size > 0 and song.bitrate <= 0:
+            song.bitrate = int((song.size * 8) / int(song.duration) / 1000)
+        if not song.ext:
+            song.ext = path.suffix.lower().lstrip(".")
         return DownloadedFile(path=path, filename=path.name, song=song)
+
+    async def probe_songs(self, songs: list[Song], concurrency: int | None = None) -> list[Song]:
+        if not songs:
+            return songs
+        limit = max(1, concurrency or self.probe_concurrency)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def probe_one(song: Song) -> None:
+            async with semaphore:
+                await self.probe_song(song)
+
+        await asyncio.gather(*(probe_one(song) for song in songs))
+        return songs
+
+    async def probe_song(self, song: Song) -> Song:
+        return await asyncio.to_thread(self._probe_song_sync, song)
+
+    def _probe_song_sync(self, song: Song) -> Song:
+        if song.size > 0 and song.duration > 0 and song.bitrate <= 0:
+            song.bitrate = int((song.size * 8) / int(song.duration) / 1000)
+        if song.size > 0 and song.bitrate > 0:
+            return song
+        provider = self.providers.get(song.source)
+        if not provider:
+            song.is_invalid = True
+            return song
+        try:
+            source = provider.get_download_url_sync(song)
+            if not source.url:
+                song.is_invalid = True
+                return song
+            headers = dict(source.headers or {})
+            headers.setdefault("User-Agent", UA_PC)
+            headers["Range"] = "bytes=0-1"
+            req = Request(source.url, headers=headers)
+            with urlopen(req, timeout=self.probe_timeout) as resp:
+                status = getattr(resp, "status", resp.getcode())
+                response_headers = dict(resp.headers.items())
+            if status not in (200, 206):
+                song.is_invalid = True
+                return song
+            size = _probe_size_from_headers(response_headers)
+            content_type = _header_value(response_headers, "Content-Type").split(";", 1)[0].strip().lower()
+            if size > 0:
+                song.size = size
+            if song.duration > 0 and song.size > 0:
+                song.bitrate = int((song.size * 8) / int(song.duration) / 1000)
+            if not song.ext:
+                song.ext = getattr(source, "extension", "") or _ext_from_url_or_type(source.url, content_type)
+            song.url = source.url
+            song.is_invalid = False
+        except Exception:
+            song.is_invalid = True
+        return song
 
     async def _safe_search(self, provider: MusicProvider, keyword: str) -> list[Song]:
         try:
-            return await provider.search(keyword, self.page_size)
+            songs = await provider.search(keyword, self.page_size)
+            for song in songs:
+                if not song.source:
+                    song.source = provider.source
+            return songs
         except Exception as exc:
             logger.warning(f"[MusicDL] {provider.source} search failed: {exc}")
             return []
@@ -469,7 +543,13 @@ class MusicAggregator:
         if not callable(method):
             return []
         try:
-            return await method(keyword, self.page_size)
+            collections = await method(keyword, self.page_size)
+            for collection in collections:
+                if not collection.source:
+                    collection.source = provider.source
+                if not collection.kind:
+                    collection.kind = search_type
+            return collections
         except NotImplementedError:
             return []
         except Exception as exc:
@@ -1001,6 +1081,23 @@ def _http_bytes(url: str, headers: dict[str, str], timeout: float) -> tuple[byte
         raise ProviderError(body.strip() or f"HTTP {exc.code}") from exc
     except URLError as exc:
         raise ProviderError(str(exc.reason)) from exc
+
+
+def _header_value(headers: dict[str, str], name: str) -> str:
+    lower = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lower:
+            return str(value or "")
+    return ""
+
+
+def _probe_size_from_headers(headers: dict[str, str]) -> int:
+    content_range = _header_value(headers, "Content-Range")
+    if content_range:
+        match = re.search(r"/(\d+)\s*$", content_range)
+        if match:
+            return _safe_int(match.group(1))
+    return _safe_int(_header_value(headers, "Content-Length"))
 
 
 def _extra(song: Song) -> dict[str, str]:

@@ -23,6 +23,24 @@
     "type": "int",
     "default": 3
   },
+  "sendMode": {
+    "description": "Send Mode",
+    "hint": "点歌下载后的发送方式: record 发送语音; file 发送群文件; both 同时发送语音和群文件.",
+    "type": "string",
+    "default": "record"
+  },
+  "forwardSongInfo": {
+    "description": "Forward Song Info",
+    "hint": "点歌下载后是否把歌曲详细信息通过合并转发发送出来.",
+    "type": "bool",
+    "default": true
+  },
+  "probeConcurrency": {
+    "description": "Probe Concurrency",
+    "hint": "搜索结果探测大小和码率时的并发数, 对应 go-music-dl UI 的探针行为.",
+    "type": "int",
+    "default": 5
+  },
   "cookies": {
     "description": "Platform Cookies",
     "hint": "对应 go-music-dl 的 Cookie 管理。按平台填写 Cookie，留空表示不使用该平台 Cookie。",

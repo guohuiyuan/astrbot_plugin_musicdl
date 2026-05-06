@@ -7,7 +7,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Plain, Record
+from astrbot.api.message_components import File, Node, Nodes, Plain, Record
 from astrbot.api.star import Context, Star, register
 
 from .musicdl.models import Collection, SEARCH_TYPE_ALBUM, SEARCH_TYPE_PLAYLIST, SEARCH_TYPE_SONG, SelectionState, Song
@@ -48,6 +48,8 @@ class MusicDLPlugin(Star):
         self.session_timeout = 120
         self.download_to_local = self._as_bool(self.config.get("downloadToLocal"), False)
         self.download_concurrency = self._normalize_int(self.config.get("downloadConcurrency"), 3, 1, 5)
+        self.send_mode = self._normalize_send_mode(self.config.get("sendMode", "record"))
+        self.forward_song_info = self._as_bool(self.config.get("forwardSongInfo"), True)
 
     async def initialize(self):
         logger.info("[MusicDL] 插件已加载，纯 Python Provider 模式启用")
@@ -196,68 +198,144 @@ class MusicDLPlugin(Star):
             async with semaphore:
                 try:
                     downloaded = await self.music.download_song(song)
-                    return song, downloaded, None
+                    return {"song": song, "downloaded": downloaded, "error": None}
                 except Exception as exc:
-                    return song, None, exc
+                    return {"song": song, "downloaded": None, "error": exc}
 
+        results = []
         tasks = [asyncio.create_task(download_one(song)) for song in songs]
         for task in asyncio.as_completed(tasks):
-            song, downloaded, exc = await task
+            item = await task
+            results.append(item)
+            song = item["song"]
+            downloaded = item["downloaded"]
+            exc = item["error"]
             if exc is not None:
                 logger.warning(f"[MusicDL] 下载失败: {song.title}: {exc}")
-                yield event.plain_result(f"下载失败：{song.title}\n原因：{exc}")
+                yield event.plain_result(f"下载失败: {song.title}\n原因: {exc}")
                 continue
-            sent = False
-            try:
-                await event.send(MessageChain([Plain(f"{song.title}\n来源：{song.source}"), Record.fromFileSystem(str(downloaded.path))]))
-                sent = True
-            except Exception as send_exc:
-                logger.warning(f"[MusicDL] 音频发送失败: {song.title}: {send_exc}")
-                yield event.plain_result(f"音频发送失败：{song.title}\n原因：{send_exc}\n文件已保存：{downloaded.path}")
+            sent = await self._send_downloaded_song(event, song, downloaded)
+            if not sent:
+                yield event.plain_result(f"发送失败: {song.title}\n文件已保存: {downloaded.path}")
             if sent and not self.download_to_local:
                 self._cleanup_downloaded_file(downloaded.path)
+        if self.forward_song_info:
+            await self._send_song_info_forward(event, results)
+
+    async def _send_downloaded_song(self, event: AstrMessageEvent, song: Song, downloaded) -> bool:
+        caption = self._song_send_caption(song)
+        sent = False
+        if self.send_mode in {"record", "both"}:
+            try:
+                await event.send(MessageChain([Plain(caption), Record.fromFileSystem(str(downloaded.path))]))
+                sent = True
+            except Exception as exc:
+                logger.warning(f"[MusicDL] 语音发送失败: {song.title}: {exc}")
+        if self.send_mode in {"file", "both"} or (self.send_mode == "record" and not sent):
+            try:
+                await event.send(MessageChain([Plain(caption), File(name=downloaded.filename, file=str(downloaded.path))]))
+                sent = True
+            except Exception as exc:
+                logger.warning(f"[MusicDL] 文件发送失败: {song.title}: {exc}")
+        return sent
+
+    async def _send_song_info_forward(self, event: AstrMessageEvent, results: list[dict]) -> None:
+        if not results:
+            return
+        details = [self._format_song_detail(item["song"], item.get("downloaded"), item.get("error")) for item in results]
+        get_self_id = getattr(event, "get_self_id", None)
+        self_id = str(get_self_id() if callable(get_self_id) else "0")
+        try:
+            nodes = [Node(uin=self_id, name="MusicDL", content=[Plain(detail)]) for detail in details]
+            await event.send(MessageChain([Nodes(nodes)]))
+        except Exception as exc:
+            logger.warning(f"[MusicDL] 合并转发歌曲信息失败: {exc}")
+            await event.send(MessageChain([Plain("歌曲信息:\n\n" + "\n\n".join(details))]))
+
+    def _song_send_caption(self, song: Song) -> str:
+        return "\n".join([
+            song.title,
+            f"来源: {song.source or '-'}",
+            f"大小: {self._format_size(song.size)}    码率: {song.bitrate} kbps" if song.bitrate else f"大小: {self._format_size(song.size)}",
+        ])
+
+    def _format_song_detail(self, song: Song, downloaded=None, error: Exception | None = None) -> str:
+        ext = song.ext or (downloaded.path.suffix.lower().lstrip(".") if downloaded else "")
+        status = "下载成功" if downloaded else (f"下载失败: {error}" if error else "-")
+        source_desc = source_description(song.source) if song.source else "-"
+        lines = [
+            f"歌名: {song.name or 'Unknown'}",
+            f"歌手: {song.artist or '未知歌手'}",
+            f"专辑: {song.album or '-'}",
+            f"来源: {song.source or '-'} ({source_desc})",
+            f"ID: {song.id or '-'}",
+            f"时长: {self._format_duration(song.duration) or '-'}",
+            f"大小: {self._format_size(song.size)}",
+            f"码率: {song.bitrate} kbps" if song.bitrate else "码率: -",
+            f"格式: {ext or '-'}",
+            f"状态: {status}",
+        ]
+        if song.link:
+            lines.append(f"链接: {song.link}")
+        if song.cover:
+            lines.append(f"封面: {song.cover}")
+        if downloaded:
+            lines.append(f"文件: {downloaded.filename}")
+        return "\n".join(lines)
 
     def _format_song_list(self, keyword: str, songs: list[Song], prefix: str = "") -> str:
         lines = []
         if prefix:
             lines.append(prefix)
-        lines.append(f"找到 {len(songs)} 首歌曲：{keyword}")
-        lines.append(f"第 1/1 页，每页 {self.music.page_size} 条")
+        lines.append(f"找到 {len(songs)} 首歌曲: {keyword}")
+        lines.append(f"1/1 页, 每页 {self.music.page_size} 条")
+        sources = sorted({song.source for song in songs if song.source})
+        if sources:
+            lines.append("来源: " + ", ".join(sources))
         rows = []
         for i, song in enumerate(songs, 1):
             rows.append([
                 "[ ]",
                 str(i),
-                song.name or "Unknown",
-                song.artist or '未知歌手',
-                song.album or "-",
+                self._truncate_text(song.name or "Unknown", 25),
+                self._truncate_text(song.artist or "未知歌手", 15),
+                self._truncate_text(song.album or "-", 15),
                 self._format_duration(song.duration) or "-",
-                '!无效' if song.is_invalid else self._format_size(song.size),
+                "!无效" if song.is_invalid else self._format_size(song.size),
                 f"{song.bitrate} kbps" if song.bitrate else "-",
                 song.source or "-",
             ])
-        lines.extend(self._format_markdown_table(['[选]', 'ID', '歌名', '歌手', '专辑', '时长', '大小', '码率', '来源'], rows))
-        lines.append('\n回复编号下载，例如：1。回复 1 2 可批量下载。回复 r1 可给第 1 首换源。回复 取消 结束。')
+        lines.extend(self._format_markdown_table(["[选]", "ID", "歌名", "歌手", "专辑", "时长", "大小", "码率", "来源"], rows))
+        lines.append("\n回复编号下载, 例如: 1. 回复 1 2 可批量下载. 回复 r1 可给第 1 首换源. 回复取消结束.")
         return "\n".join(lines)
 
     def _format_collection_list(self, keyword: str, collections: list[Collection]) -> str:
-        label = collections[0].label if collections else '集合'
+        label = collections[0].label if collections else "集合"
         kind = collections[0].kind if collections else SEARCH_TYPE_PLAYLIST
-        lines = [f"找到 {len(collections)} 个{label}：{keyword}"]
-        lines.append(f"第 1/1 页，每页 {self.music.page_size} 条")
+        lines = [f"找到 {len(collections)} {label}: {keyword}"]
+        lines.append(f"1/1 页, 每页 {self.music.page_size} 条")
+        sources = sorted({collection.source for collection in collections if collection.source})
+        if sources:
+            lines.append("来源: " + ", ".join(sources))
         rows = []
         for i, collection in enumerate(collections, 1):
             rows.append([
                 str(i),
-                collection.name or collection.id,
+                self._truncate_text(collection.name or collection.id, 40),
                 str(collection.track_count) if collection.track_count else "-",
-                collection.creator or "-",
+                self._truncate_text(collection.creator or "-", 20),
                 collection.source or "-",
             ])
-        headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), '来源']
+        headers = ["ID", f"{label}名称", self._collection_count_label(kind), self._collection_creator_label(kind), "来源"]
         lines.extend(self._format_markdown_table(headers, rows))
-        lines.append(f"\n回复编号展开{label}歌曲，例如：1。回复 取消 结束。")
+        lines.append(f"\n回复编号展开{label}歌曲, 例如: 1. 回复取消结束.")
         return "\n".join(lines)
+
+    def _truncate_text(self, value: object, limit: int) -> str:
+        text = str(value if value is not None else "").strip()
+        if len(text) <= limit:
+            return text or "-"
+        return text[: max(1, limit - 3)] + "..."
 
     def _format_markdown_table(self, headers: list[str], rows: list[list[object]]) -> list[str]:
         table = ["| " + " | ".join(self._safe_markdown_cell(item) for item in headers) + " |"]
@@ -377,6 +455,12 @@ class MusicDLPlugin(Star):
             path.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning(f"[MusicDL] 清理临时音频失败: {path}: {exc}")
+
+    def _normalize_send_mode(self, value: object) -> str:
+        raw = str(value or "record").strip().lower()
+        aliases = {"voice": "record", "audio": "record", "file": "file", "both": "both"}
+        raw = aliases.get(raw, raw)
+        return raw if raw in {"record", "file", "both"} else "record"
 
     def _as_bool(self, value: object, default: bool) -> bool:
         if isinstance(value, bool):
