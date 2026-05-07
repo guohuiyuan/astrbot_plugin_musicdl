@@ -1,6 +1,6 @@
 name: astrbot_plugin_musicdl
-display_name: MusicDL 点歌
-desc: 纯 Python 聚合音乐搜索、下载并通过 AstrBot 发送音频消息。
+display_name: 灵动点歌 MusicDL
+desc: 多源聚合、极速搜索、后台探测，一句话点歌并自动发送高质量音频，让群聊随时开唱。
 version: v0.3.0
 author: guohuiyuan
 repo: https://github.com/guohuiyuan/astrbot_plugin_musicdl
