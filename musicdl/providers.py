@@ -792,8 +792,6 @@ class MusicAggregator:
             return self.providers["migu"]
         if "joox.com" in lower:
             return self.providers["joox"]
-        if "bilibili.com" in lower or "b23.tv" in lower:
-            return self.providers["bilibili"]
         if "douyin.com" in lower or "qishui" in lower:
             return self.providers["soda"]
         if "91q.com" in lower:
